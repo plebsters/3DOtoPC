@@ -36,6 +36,27 @@ then builds the WPF app (if the .NET 8 SDK is installed) into **`dist\`**:
 `3DO to PC.exe` (the app), `3DO to PC CLI.exe` (command line), `tdocore.dll` and `runtime\`.
 Keep those together; copy the whole `dist\` folder if you move it.
 
+## Game launcher
+
+`dist\"3DO Launcher.exe"` shows every converted game as a tile and starts it with a
+double-click, Enter, or the A button on an Xbox controller.
+
+- It scans the `games\` folder next to `dist\` (where the converter puts games).
+  **Games folder…** points it at any other folder; the choice is remembered.
+  A game is any folder holding an `.exe` and a `data` folder.
+- Search box (Ctrl+F) and sorting by name, recently played or most played.
+- Box art: **Get box art** downloads a cover for every game that has none, from
+  the free [libretro thumbnails](https://github.com/libretro-thumbnails/The_3DO_Company_-_3DO)
+  collection (USA covers preferred). Right-click a tile → **Choose box art online…**
+  to search the collection with a preview and pick a different cover, or
+  **Set cover image from file…** to use your own. Covers are saved as `cover.png`
+  in the game's folder; games without one get a placeholder tile.
+- Controller: D-pad or left stick to move, A or Start to play, Y to rescan,
+  B to clear the search. The launcher minimises while a game runs and comes back
+  when it exits.
+- Play count and last-played time are kept in `%AppData%\3DO to PC\launcher.json`.
+  Nothing goes online except box art, and only when you ask for it.
+
 ## Quick test (drag and drop)
 
 1. Install **Build Tools for Visual Studio 2022** (free) with the **Desktop development with C++**
