@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>TdoConverter</AssemblyName>
+    <Product>3DO to PC</Product>
+    <AssemblyTitle>3DO to PC</AssemblyTitle>
+    <RootNamespace>TdoConverter</RootNamespace>
+    <!-- Native core built by CMake (Build-App.bat does this first) -->
+    <NativeBuildDir>$(MSBuildThisFileDirectory)..\..\build</NativeBuildDir>
+  </PropertyGroup>
+
+  <!-- Copy the native converter DLL and the runtime sources next to the app. -->
+  <ItemGroup>
+    <None Include="$(NativeBuildDir)\tdocore.dll" Condition="Exists('$(NativeBuildDir)\tdocore.dll')"
+          CopyToOutputDirectory="PreserveNewest" Link="tdocore.dll" />
+    <None Include="$(NativeBuildDir)\Release\tdocore.dll" Condition="Exists('$(NativeBuildDir)\Release\tdocore.dll')"
+          CopyToOutputDirectory="PreserveNewest" Link="tdocore.dll" />
+    <None Include="..\..\runtime\**\*" CopyToOutputDirectory="PreserveNewest"
+          LinkBase="runtime" />
+    <!-- Optional portable compiler: put cmake\, ninja\, llvm\ under gui\toolchain\ -->
+    <None Include="..\toolchain\**\*" CopyToOutputDirectory="PreserveNewest"
+          LinkBase="toolchain" Condition="Exists('..\toolchain')" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,159 @@
+<Window x:Class="TdoLauncher.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="3DO Launcher" Width="1100" Height="720" MinWidth="560" MinHeight="400"
+        Background="{StaticResource Bg}" Foreground="{StaticResource Text}"
+        FontFamily="Segoe UI" FontSize="13" WindowStartupLocation="CenterScreen">
+    <Window.InputBindings>
+        <KeyBinding Key="F5" Command="{x:Static NavigationCommands.Refresh}"/>
+        <KeyBinding Key="F" Modifiers="Ctrl" Command="{x:Static NavigationCommands.Search}"/>
+    </Window.InputBindings>
+    <Window.CommandBindings>
+        <CommandBinding Command="{x:Static NavigationCommands.Refresh}" Executed="Refresh_Executed"/>
+        <CommandBinding Command="{x:Static NavigationCommands.Search}" Executed="Search_Executed"/>
+    </Window.CommandBindings>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Border Background="{StaticResource Panel}" Padding="18,12">
+            <DockPanel LastChildFill="False">
+                <StackPanel DockPanel.Dock="Left" VerticalAlignment="Center">
+                    <TextBlock Text="3DO Library" FontSize="22" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="CountText" Foreground="{StaticResource Muted}" Margin="0,2,0,0"/>
+                </StackPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Grid Width="220">
+                        <TextBox x:Name="SearchBox" Padding="8,6" Background="#2C2C38" Foreground="{StaticResource Text}"
+                                 BorderThickness="0" CaretBrush="{StaticResource Text}" VerticalContentAlignment="Center"
+                                 TextChanged="SearchBox_TextChanged" ToolTip="Search (Ctrl+F)"/>
+                        <TextBlock Text="Search games" Foreground="{StaticResource Muted}" Margin="10,0,0,0"
+                                   VerticalAlignment="Center" IsHitTestVisible="False">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Text, ElementName=SearchBox}" Value="">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Grid>
+                    <ComboBox x:Name="SortBox" Width="150" Margin="8,0,0,0" VerticalContentAlignment="Center"
+                              SelectionChanged="SortBox_SelectionChanged">
+                        <ComboBoxItem Content="Name" Tag="Name"/>
+                        <ComboBoxItem Content="Recently played" Tag="Recent"/>
+                        <ComboBoxItem Content="Most played" Tag="Most"/>
+                    </ComboBox>
+                    <Button x:Name="BoxArtButton" Content="Get box art" Click="GetBoxArt_Click"
+                            ToolTip="Download covers for games that have none (libretro thumbnails on GitHub)"/>
+                    <Button Content="Games folder…" Click="ChooseFolder_Click" ToolTip="Choose the folder that holds your converted games"/>
+                    <Button Content="Refresh" Click="Refresh_Click" ToolTip="Scan the folder again (F5)"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Game grid -->
+        <ListBox x:Name="GameList" Grid.Row="1" Background="Transparent" BorderThickness="0" Padding="12"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                 MouseDoubleClick="GameList_MouseDoubleClick" KeyDown="GameList_KeyDown"
+                 SelectionChanged="GameList_SelectionChanged">
+            <ListBox.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+            </ListBox.ItemsPanel>
+            <ListBox.ItemContainerStyle>
+                <Style TargetType="ListBoxItem">
+                    <Setter Property="Margin" Value="8"/>
+                    <Setter Property="Padding" Value="0"/>
+                    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ListBoxItem">
+                                <Border x:Name="Frame" BorderThickness="3" BorderBrush="Transparent" CornerRadius="10">
+                                    <ContentPresenter/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Frame" Property="BorderBrush" Value="#55E0B040"/>
+                                    </Trigger>
+                                    <Trigger Property="IsSelected" Value="True">
+                                        <Setter TargetName="Frame" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                    <Setter Property="ContextMenu">
+                        <Setter.Value>
+                            <ContextMenu>
+                                <MenuItem Header="Play" Click="MenuPlay_Click" FontWeight="SemiBold"/>
+                                <MenuItem Header="Open game folder" Click="MenuOpenFolder_Click"/>
+                                <Separator/>
+                                <MenuItem Header="Choose box art online…" Click="MenuChooseBoxArt_Click"/>
+                                <MenuItem Header="Set cover image from file…" Click="MenuSetCover_Click"/>
+                                <MenuItem Header="Remove cover image" Click="MenuRemoveCover_Click"/>
+                            </ContextMenu>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </ListBox.ItemContainerStyle>
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <Border Width="180" Background="{StaticResource Tile}" CornerRadius="8" ToolTip="{Binding Folder}">
+                        <StackPanel>
+                            <Grid Height="250" Background="#1C1C24">
+                                <!-- Placeholder when there is no cover image -->
+                                <Border CornerRadius="8,8,0,0">
+                                    <Border.Background>
+                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                            <GradientStop Color="#3A3550" Offset="0"/>
+                                            <GradientStop Color="#1E2A3A" Offset="1"/>
+                                        </LinearGradientBrush>
+                                    </Border.Background>
+                                    <TextBlock Text="{Binding Initials}" FontSize="48" FontWeight="Bold" Foreground="#60FFFFFF"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <Image Source="{Binding Cover}" Stretch="Uniform" Margin="4"/>
+                            </Grid>
+                            <StackPanel Margin="10,8,10,10">
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="{Binding Subtitle}" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,2,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <!-- Shown when the folder has no games -->
+        <StackPanel x:Name="EmptyPanel" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Visibility="Collapsed" MaxWidth="520">
+            <TextBlock Text="No games found" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="EmptyText" Foreground="{StaticResource Muted}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,8,0,16"/>
+            <Button Content="Choose games folder…" Click="ChooseFolder_Click" HorizontalAlignment="Center" Margin="0"/>
+        </StackPanel>
+
+        <!-- Footer: selected game -->
+        <Border Grid.Row="2" Background="{StaticResource Panel}" Padding="18,10">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="FolderButton" Content="Open folder" Click="MenuOpenFolder_Click"/>
+                    <Button x:Name="PlayButton" Content="▶  Play" Click="Play_Click" FontWeight="SemiBold"
+                            Background="{StaticResource Accent}" Foreground="#16161C" Padding="22,7"/>
+                </StackPanel>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="SelName" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="SelInfo" Foreground="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="StatusText" Foreground="{StaticResource Accent}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>
