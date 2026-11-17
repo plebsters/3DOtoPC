@@ -175,6 +175,14 @@ Drop the same game again and the code it had to interpret is recompiled (`interp
 * **Feedback loop.** On exit, the game writes `interp_hits.txt`: the
   addresses it had to interpret. Pass that file back as **Runtime hints**
   (GUI) or `--hints` (CLI) and those blocks get recompiled on the next build.
+* **Every program on the disc.** Besides the LaunchMe, the converter translates the
+  other programs it finds on the disc(s) (front ends, movie players, game parts started
+  with `LoadProgram` or `LoadCode`; the disc's `System` folder is skipped, since the
+  runtime replaces the OS). These programs are loaded at an address chosen at run time,
+  so their code is written relative to the load address. When the game starts one, the
+  runtime recognises the file by its hash and, once the program has relocated itself and
+  reaches its entry point, switches on each translated block whose bytes still match.
+  The log says `program "TF": 5960 of 5974 translated blocks match and run natively`.
 * **Self-modifying code / overlays.** Writes into recompiled code are tracked
   in 64-byte granules. A block whose bytes change falls back to the
   interpreter permanently. A LaunchMe hash check turns on interpreter-only
@@ -249,8 +257,10 @@ What a thread waits for is spelled out: a message port and how many messages are
 an audio cue, a timer or I/O completion, a signal from another thread, or the reply to a
 message (and whether that message is still queued or another thread took it without
 replying). Below the verdict come every thread's state and last ten OS calls, ports with
-unread messages, free memory, and the problems the log reported (files not found, out of
-memory, unsupported calls). Most stalls can be explained from this file alone, without the
+unread messages, the last disc reads (file, block, destination address), free memory, and
+the problems the log reported (files not found, out of memory, unsupported calls). When a
+game overwrites its own code, `tdort.log` says who wrote it: game code near an address, or
+an OS call such as a disc read. Most stalls can be explained from this file alone, without the
 game's disc.
 
 ## Debugging a converted game
@@ -274,9 +284,12 @@ Environment variables:
 | `TDORT_TRACE_READS=1` | log every file read |
 | `TDORT_MEM_TRACE=1` | log every allocation and free |
 | `TDORT_WATCH=2AFA64` | log when that memory word changes (checked at each OS call) |
+| `TDORT_BREAK=3C6C8` | log the registers and 8 words at the stack each time code reaches that address |
+| `TDORT_BREAK_DUMP=2ABE20` | with `TDORT_BREAK`, also log 32 words at that address |
+| `TDORT_NULLREAD=1` | when a disc read goes to address 0, log the caller chain |
 | `TDORT_DUMP_SWITCH=<thread>` | log that thread's frame pointer and saved frame each time it resumes |
 | `TDORT_DUMPMEM=frame:addr:len` | write guest memory to `mem_<frame>.bin` |
-| `TDORT_SLEEP_TRACE=1` | log audio-clock sleeps |
+| `TDORT_SLEEP_TRACE=1` | log audio-clock sleeps and the tags of `CreateSample`/`SetAudioItemInfo` |
 | `TDORT_AUDIO_STATUS=1` | keep the status line going past 60 s, with the active voices |
 | `TDORT_SPEED_TRACE=1` | every 2 s: how many frames used all the CPU |
 | `TDORT_CPI=2` | cycles per instruction (default 1); higher gives games less CPU per frame |
@@ -297,7 +310,8 @@ sources are used only for interface facts (call names, numbers, documented behav
 code is taken from them. All of it is in `runtime/include/tdort/portfolio_abi.h` as plain
 numbers.
 
-* **Kernel:** items, tasks and threads (priority scheduling with time slices), signals,
+* **Kernel:** items, tasks and threads (priority scheduling with time slices; the creator
+  gets `SIGF_DEADTASK`, or the exit message it asked for, when a program or thread ends), signals,
   message ports, semaphores, memory (first-fit DRAM then VRAM, `MEMTYPE_FILL`, `FROMTOP`,
   `STARTPAGE`/`SYSTEMPAGESIZE` page alignment, `INPAGE`, free-page bitmaps), lists
   including `UniversalInsertNode` (runs the game's compare function), `SetFunction`,
@@ -321,7 +335,12 @@ numbers.
   `varmono*`, `fixedmono/stereo*`, `halfmono*`, SDX2 and ADP4 decoders), mixers, envelopes
   (also on `envelope.dsp` instruments, ending with their cue), attachments, loops, cues,
   `LinkAttachments`, the audio clock at the rate the game sets (`SetAudioRate`,
-  `SetAudioDuration`), `SleepUntilTime`.
+  `SetAudioDuration`), `SleepUntilTime`, samples made from an AIFF image in memory
+  (`CreateSample` with `AF_TAG_IMAGE_ADDRESS`, left in place or copied), samples attached to
+  an instrument template (given to every instrument made from it), `AbandonInstrument` and
+  `AdoptInstrument` (hands back only an abandoned instrument, as the music library expects).
+* **C library output:** `printf` goes to the log; `sprintf` writes through the output
+  routine the C library passes, so names built with it (`CAM000`) are right.
 * **Operamath, International** (English/US locale, number and date formatting, string
   compare/convert), **Compression** (LZSS compressor and decompressor), **JString**
   (Shift-JIS, Unicode, ASCII, romaji, hiragana, katakana).
@@ -335,9 +354,48 @@ Compatibility Status" sheet. Playable: Real Pinball, Slam 'n Jam '95, Gex, Burni
 Crash 'n Burn, Demolition Man, John Madden Football. Partly working: Brain Dead 13 (video
 scenes play), Creature Shock (intro plays), Doom (reaches E1M1), Captain Quazar, Escape from
 Monster Manor, Alone in the Dark, Jurassic Park Interactive, Another World, Ballz, Cannon
-Fodder, Hell. Still stuck: Cyberia, Dragon Lore.
+Fodder, Hell, Cyberia (reaches the name entry), Dragon Lore (intro with sound and the main
+menu).
 
 Fixes found by running games (each a difference from the real OS):
+* Super Street Fighter II Turbo: its music thread (the highest priority) sleeps with
+  `SleepUntilTime` until a time already past, in a loop. The folio still waits for the next
+  audio-timer tick there; the runtime returned at once, so no other thread ever ran. Now a
+  task gets at most one such return per audio tick (4 a frame) and then waits for the frame.
+* Putt-Putt Goes to the Moon asks for `$boot/HEGAMES/$boot/HEGAMES/puttmoon.he0`. The file
+  folio expands an alias in any part of a path, and `$boot` (`/cd-rom`) goes back to the root,
+  so this is `/cd-rom/HEGAMES/puttmoon.he0`. The runtime only expanded a leading alias.
+* FIFA International Soccer: `LookupItem(0)` gave 0 instead of KernelBase (item 0 is the
+  kernel). The 1.x `WaitIO` looks up `io_MsgItem`, which is 0 without a reply port, and read
+  garbage, so its timer task polled forever at the highest priority.
+* Zhadnost and Killing Time now get past their logos (EZFlix sound player, below).
+* Myst, 3DO Multi Game Sampler 3: the discs have file names Windows can't store (`?`, `<`,
+  `>`), so conversion failed. Such characters are now stored as `%XX` and the runtime reads
+  the names back exactly (`tdort/host_name.h`).
+* PO'ed, Cyberia's joystick check, Creature Shock: messages created with a data area
+  (`CREATEMSG_TAG_DATA_SIZE`) didn't get one, so the event broker couldn't answer
+  `EB_DescribePods` and PO'ed quit with "could not connect to event broker". Creature Shock
+  now skips its intro with Start and reaches the mission menu.
+* Immercenary: `ExecuteAsSubroutine` started code modules without argc, argv and KernelBase
+  in r5-r7 (and with r0 wrong), so its Cinepak module crashed at once.
+* Super Street Fighter II Turbo, 3DO Magazine 2: threads with tiny stacks (256 bytes) run past
+  their limit; the C library then calls the kernel to grow the stack (vector -31), which
+  wasn't there. The stack limit is now the kernel's (base + 128) and the stack grows.
+* `printf`/`sprintf` text now goes through the C library's own output routine (the fifth
+  argument of the kernel call), as on the console, whatever the library version.
+* Zhadnost, Killing Time: the EZFlix movie library's sound player (`ezflix225.dsp`) was
+  unknown, so its end cues never came and the game waited forever. It now plays silently
+  at its pace (its sound format isn't decoded yet).
+* Dragon Lore: `CreateSample` ignored an AIFF image in memory, so its sound buffer had no
+  address and the next movie read its first block over address 0 and crashed; samples
+  attached to an instrument template were refused; `AdoptInstrument` made a new instrument
+  instead of returning an abandoned one, which the music library reports as an error.
+* Cyberia: `sprintf` output was lost (the C library passes its own output routine), so the
+  camera file names came out as `CAM00` and the game retried a missing file forever, taking
+  minutes per frame. Its other programs (TF, 3DOCAM, SELECTMENU) now run translated:
+  3000 frames take 6 seconds instead of more than 8 minutes.
+* Cyberia: threads ending sent no `SIGF_DEADTASK`, so its movie player waited forever for
+  its streaming threads after the intro.
 * Creature Shock: an envelope on an `envelope.dsp` instrument never ended, so its end cue
   never fired; `SendIO` returned a stale `ER_Aborted` after `AbortIO`.
 * Brain Dead 13: `MEMTYPE_STARTPAGE` was ignored; the game clears whole pages, which wiped
@@ -352,22 +410,21 @@ Fixes found by running games (each a difference from the real OS):
 **Testing:** `tests/` holds unit tests and end-to-end tests on synthetic discs. The guest
 program `tests/guest/api.c` (compiled for the 3DO CPU) checks 20 groups of OS behaviour,
 including callbacks into game code, compression round trips, Japanese text conversion,
-page-aligned memory, asynchronous timers, `WaitIO` and `AbortIO`. Every change is also run
+page-aligned memory, asynchronous timers, `WaitIO` and `AbortIO`. `tests/guest/audio.c` checks the
+audio folio the same way, including samples from an AIFF image, template attachments and
+`AdoptInstrument`. Every change is also run
 against the local game builds before release.
 
 **Not done yet:**
 * Sound DSP effects (reverb, filters, echo) pass the sound through unchanged.
 * Cinepak and the 3DO streaming-movie library are untested.
 * Light gun, mouse and two-player input are untested.
-* Separately loaded programs (Madden's front end, Gex's movie player) run in the
-  interpreter rather than being recompiled.
 * CPU timing counts one cycle per instruction and drawing costs no CPU time, so games that
   run as fast as the CPU allows can run faster than on a console (`TDORT_CPI` adjusts it).
 
 ## Roadmap
 
-1. Recompile separately loaded programs at conversion time.
-2. A more accurate speed model (cycles per instruction, cel engine time).
-3. Cinepak / streaming-movie library, DSP effects, more input devices.
-4. Recompiler optimizations: direct block chaining, register caching, jump-table recovery.
-5. Per-game patch files (widescreen, 60 fps, input remaps) and an Xbox UWP platform layer.
+1. A more accurate speed model (cycles per instruction, cel engine time).
+2. Cinepak / streaming-movie library, DSP effects, more input devices.
+3. Recompiler optimizations: direct block chaining, register caching, jump-table recovery.
+4. Per-game patch files (widescreen, 60 fps, input remaps) and an Xbox UWP platform layer.
