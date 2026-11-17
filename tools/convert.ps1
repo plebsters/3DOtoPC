@@ -102,10 +102,31 @@ $games = Join-Path $Root 'games'
 New-Item -ItemType Directory -Force -Path $games | Out-Null
 $exit = 0
 
+# A game's other discs: "...(Disc 1 of 2)..." -> the same name with Disc 2, 3, ...
+# beside it (dropped together or found in the same folder). Disc 1 is converted.
+function Get-DiscNumber([string]$n) { if ($n -match '\(Disc\s*(\d+)') { [int]$Matches[1] } else { 1 } }
+function Find-OtherDiscs([System.IO.FileSystemInfo]$item) {
+    if ($item.Name -notmatch '\(Disc\s*(\d+)\s*of\s*(\d+)\)') { return @() }
+    $mine = [int]$Matches[1]; $count = [int]$Matches[2]
+    $parent = if ($item.PSIsContainer) { $item.Parent.FullName } else { $item.DirectoryName }
+    $found = @()
+    for ($k = 1; $k -le $count; $k++) {
+        if ($k -eq $mine) { continue }
+        $want = $item.Name -replace '\(Disc\s*\d+\s*of', "(Disc $k of"
+        $p = Join-Path $parent $want
+        if (Test-Path -LiteralPath $p) { $found += Get-Item -LiteralPath $p }
+    }
+    return $found
+}
+$handled = @{}
+$Inputs = @($Inputs | Sort-Object { Get-DiscNumber (Split-Path -Leaf $_.Trim('"')) })
 foreach ($in in $Inputs) {
     $path = $in.Trim('"')
     if (-not (Test-Path -LiteralPath $path)) { Fail "Not found: $path"; $exit = 1; continue }
     $item = Get-Item -LiteralPath $path
+    if ($handled.ContainsKey($item.FullName)) { continue }    # converted with its disc 1
+    $otherDiscs = @(Find-OtherDiscs $item | Where-Object { (Get-DiscNumber $_.Name) -gt (Get-DiscNumber $item.Name) })
+    foreach ($d in $otherDiscs) { $handled[$d.FullName] = $true }
     $base = if ($item.PSIsContainer) { $item.Name } else { $item.BaseName }
     # A short name: disc-image names carry tags such as "(1993)(Electronic Arts)(US)[!]"
     # and subtitles, and a long name pushes Visual Studio's object-file paths
@@ -120,6 +141,7 @@ foreach ($in in $Inputs) {
 
     Step "Converting $($item.Name) -> games\$name"
     $convArgs = @('convert', $item.FullName, $out, '--name', $name, '--runtime', (Join-Path $Root 'runtime'))
+    foreach ($d in $otherDiscs) { $convArgs += @('--disc', $d.FullName); Write-Host "  with $($d.Name)" }
     $hints = Join-Path $out 'interp_hits.txt'
     if (Test-Path $hints) {
         Write-Host 'Reusing interp_hits.txt from the last run (those blocks get recompiled).'

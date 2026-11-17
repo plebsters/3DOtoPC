@@ -29,6 +29,7 @@ public sealed class BoxArtPicker : Window
         Width = 760; Height = 560; MinWidth = 520; MinHeight = 380;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         FontFamily = new FontFamily("Segoe UI");
+        try { Icon = BitmapFrame.Create(new Uri("pack://application:,,,/3do2pc.ico")); } catch { }
 
         var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(16, 6, 16, 6) };
         _ok.Click += (_, _) => Accept();

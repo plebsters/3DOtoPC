@@ -57,6 +57,32 @@ bool Portfolio::broker_receive(HleItem& msg, uint32_t data, uint32_t size) {
         for (auto& e : listeners_) if (e.port == l.port) { e = l; replaced = true; }
         if (!replaced) listeners_.push_back(l);
         rt.log("event broker: listener port %d configured (trigger %08X, capture %08X)", l.port, l.trigger, l.capture);
+    } else if (flavor == 13) {                 // EB_SetFocus { flavor, listener }: reply = the focused listener
+        if (size >= 8) broker_focus_ = int32_t(r32(data + 4));
+        result = broker_focus_;
+    } else if (flavor == 15) {                 // EB_GetFocus
+        result = broker_focus_ ? broker_focus_ : (listeners_.empty() ? 0 : listeners_.front().port);
+    } else if (flavor == 27) {                 // EB_DescribePods: one standard control pad
+        // Reply data goes in the message's own buffer: { EB_DescribePodsReply, count, PodDescription[] }.
+        const uint32_t buf = r32(msg.addr + message::DataPtr);
+        const uint32_t room = r32(msg.addr + message::DataPtrSize);
+        constexpr uint32_t kPodSize = 40, kLen = 8 + kPodSize;
+        if (buf && room >= kLen && guest_range_ok(buf, kLen)) {
+            std::vector<uint8_t> z(kLen, 0);
+            rt.mem.write_block(buf, z.data(), kLen);
+            w32(buf, 28);                                   // EB_DescribePodsReply
+            w32(buf + 4, 1);                                // pod count
+            const uint32_t pod = buf + 8;
+            w8(pod + 0, 1);                                 // pod_Number
+            w8(pod + 1, 1);                                 // pod_Position
+            w32(pod + 4, 0x80);                             // pod_Type: control pad
+            w32(pod + 8, 16);                               // pod_BitsIn
+            w32(pod + 16, 0x80000000u);                     // POD_IsControlPad / generic control pad #0
+            w8(pod + 20, 1);                                // pod_GenericNumber[GENERIC_ControlPad] = first pad
+            w32(msg.addr + message::DataSize, kLen);
+        } else {
+            result = int32_t(0x81010108);                   // no room for the description (buffer too small)
+        }
     } else {
         stub("event broker flavor " + std::to_string(flavor));
     }
@@ -85,11 +111,21 @@ void Portfolio::broker_post(Listener& l, uint32_t pad) {
     l.fresh = false;
     if (events.empty()) return;
 
-    // Message + buffer from the pool (8 in flight at most, as a real queue would cap).
+    // A listener that is not reading its port (Madden's boot program waits
+    // while its front end runs) keeps at most 4 unread events; the rest are
+    // dropped for it alone. Otherwise it took the whole pool, and the front
+    // end's own listener got no input at the Game Setup screen.
+    int outstanding = 0;
+    for (auto& [msg, dest] : broker_dest_)
+        if (dest == l.port && std::find(broker_free_.begin(), broker_free_.end(), msg) == broker_free_.end()) ++outstanding;
+    if (outstanding >= 4) return;
+
+    // Message + buffer from the pool: 8 in flight per listener at most.
     int32_t m;
     if (!broker_free_.empty()) { m = broker_free_.back(); broker_free_.pop_back(); }
-    else if (broker_buf_.size() < 8) {
+    else if (broker_buf_.size() < 8 * std::max<size_t>(1, listeners_.size())) {
         HleItem& msg = new_item(ItemKind::Message, kSubsysKernel, kNodeMessage, message::Size, "", false);
+        msg.owner_task = 0;      // the broker's own: not deleted when the task that happened to be running ends
         msg.reply_port = broker_port_;
         w32(msg.addr + message::ReplyPort, uint32_t(broker_port_));
         m = msg.num;

@@ -9,9 +9,15 @@
     <AssemblyName>3DO Launcher</AssemblyName>
     <Product>3DO Launcher</Product>
     <AssemblyTitle>3DO Launcher</AssemblyTitle>
+    <ApplicationIcon>..\..\assets\3do2pc.ico</ApplicationIcon>
     <RootNamespace>TdoLauncher</RootNamespace>
     <!-- Lets the project build on non-Windows machines too (CI, checks). -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
+
+  <!-- The 3DO2PC icon: on the .exe (ApplicationIcon) and on every window. -->
+  <ItemGroup>
+    <Resource Include="..\..\assets\3do2pc.ico" Link="3do2pc.ico" />
+  </ItemGroup>
 
 </Project>

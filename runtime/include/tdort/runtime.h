@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -32,7 +33,7 @@ extern "C" const uint32_t    tdort_image_base;
 // Host side of an HLE call. Arguments in r0-r3 (+stack), result in r0.
 using HleFn = std::function<void(Cpu*)>;
 
-struct HleEntry { std::string name; HleFn fn; uint64_t calls = 0; };
+struct HleEntry { std::string name; HleFn fn; uint64_t calls = 0; bool stub = false; };
 
 struct Platform;   // platform.h
 struct AifImage;   // aif.h
@@ -47,6 +48,7 @@ struct RuntimeConfig {
     bool interp_only       = false;           // ignore recompiled code (debugging)
     bool trace             = false;
     uint32_t cpu_hz        = 12500000;        // ARM60 at 12.5 MHz
+    double   cpi           = 1.0;             // average cycles per instruction (TDORT_CPI overrides)
     uint32_t refresh_hz    = 60;
 };
 
@@ -65,13 +67,18 @@ public:
     void request_vblank_wait() { vblank_wait_ = true; }
 
     // HLE registration
-    void     register_swi(uint32_t number, std::string name, HleFn fn);
-    uint32_t register_trap(std::string name, HleFn fn);   // returns guest address
+    void     register_swi(uint32_t number, std::string name, HleFn fn, bool stub = false);
+    uint32_t register_trap(std::string name, HleFn fn, bool stub = false);   // returns guest address
+    void     dump_api(const char* path) const;   // every vector and SWI, marked "stub" when only a placeholder
     bool     handle_swi(uint32_t comment, uint32_t pc);
     void     handle_trap(uint32_t addr);
 
     // Guest-memory allocator for HLE-owned structures (folios, items...).
     uint32_t hle_alloc(uint32_t size, uint32_t align = 4);
+    // Copies a small ARM routine (big-endian words) into HLE memory and marks
+    // it as code the CPU may run (helpers that call back into the game).
+    uint32_t hle_code(const uint32_t* words, size_t count);
+    uint32_t hle_code_lo_ = 0, hle_code_hi_ = 0;
 
     Cpu    cpu;
     Memory mem;
@@ -80,6 +87,12 @@ public:
     std::unique_ptr<Gfx>   gfx;
     std::unique_ptr<Audio> audio;
     std::unique_ptr<Portfolio> os;
+    // problems the log reported (not found, out of memory, unsupported...):
+    // line -> (times seen, first frame); for the diagnosis report
+    std::map<std::string, std::pair<uint32_t, uint32_t>> problems;
+    std::string crash_reason;
+    uint64_t screen_hash_ = 0;
+    uint32_t screen_change_frame_ = 0;
     uint32_t pad_state = 0;   // buttons, see input.h
     uint32_t retry_pc = 0;    // where a blocked OS call resumes: the SWI, or the trap address
 

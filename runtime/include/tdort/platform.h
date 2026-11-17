@@ -10,6 +10,7 @@ enum PadBit : uint32_t {
     PadUp = 1 << 0, PadDown = 1 << 1, PadLeft = 1 << 2, PadRight = 1 << 3,
     PadA = 1 << 4, PadB = 1 << 5, PadC = 1 << 6,
     PadL = 1 << 7, PadR = 1 << 8, PadX = 1 << 9 /*Stop*/, PadP = 1 << 10 /*Play/Pause*/,
+    PadNextDisc = 1 << 16,   // host only (F2): put the next disc of a multi-disc game in the drive
 };
 
 struct Platform {

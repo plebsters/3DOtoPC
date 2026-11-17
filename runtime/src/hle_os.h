@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <deque>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -56,6 +57,11 @@ struct HleItem {
 
 // One Portfolio task or thread. The CPU registers of the task that is not
 // running are kept here; switching tasks swaps them with the live Cpu.
+struct CallRec {                    // one OS call, for the diagnosis report
+    char     name[32] = {};
+    uint32_t a[4] = {}, site = 0, frame = 0, count = 0;
+};
+
 struct HleTask {
     int32_t  item = 0;
     uint32_t addr = 0;              // guest Task structure
@@ -72,6 +78,7 @@ struct HleTask {
     bool     program = false;       // a separately loaded executable, not a thread
     std::string cwd;                // current directory, guest-normalized ("/Data"); each task has its own
     std::string name;
+    std::deque<CallRec> calls;      // its last OS calls (repeats counted)
 };
 
 class Portfolio {
@@ -101,6 +108,30 @@ public:
 
     // ---- game heap
     uint32_t alloc(uint32_t size, uint32_t flags);
+    void     update_free_page_bits();
+    void     plot(int32_t bitmap_item, int32_t x, int32_t y, uint16_t pen);
+    int32_t  draw_text(uint32_t gc, int32_t bitmap_item, const std::vector<uint32_t>& text);
+    uint32_t audio_rate_ = 240u << 16, audio_rate_ticks_ = 0, audio_rate_frame_ = 0;   // the audio clock
+    void     set_audio_rate(uint32_t rate16);
+    uint32_t font_ = 0;                           // the Font structure GetCurrentFont returns
+    // Compression folio (hle_compress.cpp)
+    struct Codec;
+    std::map<uint32_t, std::shared_ptr<Codec>> codecs_;   // by Compressor/Decompressor handle
+    uint32_t deliver_code_ = 0, final_word_ = 0;
+    void     install_compression();
+    void     install_jstring();
+    // diagnosis report (hle_report.cpp)
+    void        note_call(const char* name, const uint32_t* r, uint32_t site);
+    std::string describe_wait(const HleTask& t, uint32_t mask);
+    std::string write_report(const std::string& ended, uint32_t screen_change_frame);
+    uint32_t    last_input_frame_ = 0;    // last time the game handed back a controller event
+    std::vector<uint32_t> read_sjis(uint32_t a);
+    int32_t  write_sjis(const std::vector<uint32_t>& t, uint32_t out, uint32_t size, uint8_t filler, bool ascii);
+    void     codec_emit_byte(Codec& d, uint8_t c, std::vector<uint32_t>& out);
+    void     codec_deliver(Codec& d, const std::vector<uint32_t>& words, int32_t result);
+    void     compress_some(Codec& d, bool flush, std::vector<uint32_t>& out);
+    static constexpr uint32_t kGcFGPen = 20, kGcBGPen = 24, kGcPenX = 28, kGcPenY = 32;
+    void     delete_task_items(const HleTask& t);
     void     free_mem(uint32_t addr);
 
     // ---- guest lists (Exec-style: head / null / tailpred anchor)
@@ -189,8 +220,10 @@ private:
     void    timer_io(HleItem& ior, uint32_t info);
     void    sport_io(HleItem& ior, uint32_t info);
     void    complete_io(HleItem& ior, int32_t err, uint32_t actual, int32_t task_item = 0);
-    struct VblIo { int32_t ior, task, err; uint32_t actual; };
-    std::vector<VblIo> vbl_io_;                       // SPORT transfers that finish at the next vertical blank
+    struct VblIo { int32_t ior, task, err; uint32_t actual; uint32_t due_frame = 0; };
+    std::vector<VblIo> vbl_io_;                       // requests that finish later: SPORT at the next vertical blank, timers when due
+    void    defer_io(HleItem& ior, uint32_t frames);
+    static bool old_io();
     void    send_message(HleItem& port, HleItem& msg);
     void    wait_port(int32_t port, int32_t msg);
     void    unqueue(HleItem& msg);
@@ -213,7 +246,11 @@ private:
     void    raise_signal(int32_t task_item, uint32_t mask);
     int32_t create_task(const std::string& name, uint32_t tags, uint8_t pri);
     void    install_tasks();
-    std::vector<HleTask> tasks_;
+    // deques, not vectors: references to items and tasks stay valid while new
+    // ones are added. With a vector, code holding one item while creating
+    // another (a device, then its IOReq) read freed memory whenever the list
+    // grew past its capacity (Captain Quazar crashed around item 8192).
+    std::deque<HleTask> tasks_;
     size_t  cur_ = 0;
     uint32_t blocked_streak_ = 0;
     uint32_t thread_exit_trap_ = 0, idle_trap_ = 0;
@@ -254,6 +291,20 @@ private:   // programs we could not run, "exiting" soon
     std::vector<Listener> listeners_;
     std::vector<int32_t> broker_free_;            // idle broker-owned event messages
     std::map<int32_t, uint32_t> broker_buf_;      // event message -> its guest buffer
+    std::map<int32_t, std::pair<uint32_t, uint32_t>> read_address_;   // bitmap -> SetReadAddress(buffer, width)
+    uint32_t disc_os_version_ = 0;
+    int32_t  locale_item_ = 0;                    // the International folio's locale
+    int32_t  broker_focus_ = 0;                   // EB_SetFocus listener
+    mutable std::vector<std::string> discs_;      // disc folders (data, data_disc2, ...)
+    mutable size_t disc_ = 0;                     // the disc in the drive
+    const std::string& disc_root() const;
+public:
+    void     next_disc();
+private:
+    void     install_international();
+    std::vector<uint16_t> read_ustr(uint32_t a, uint32_t max_chars = 4096);
+    int32_t  write_ustr(uint32_t a, uint32_t bytes, const std::vector<uint16_t>& s);
+    uint32_t alloc_ustr(const char* s);
     std::map<int32_t, int32_t> broker_dest_;      // event message -> listener port it was sent to
     void    drop_dead_listeners();
     uint32_t last_pad_ = 0, frame_no_ = 0;
@@ -264,7 +315,7 @@ private:   // programs we could not run, "exiting" soon
     int32_t draw_cels(int32_t bitmap, uint32_t ccb);
 
     uint32_t kbase_ = 0, memhdr_dram_ = 0, memhdr_vram_ = 0, graphics_base_ = 0;
-    std::vector<HleItem> items_;
+    std::deque<HleItem> items_;
     std::map<std::string, int> stub_counts_;
     std::map<uint32_t, uint32_t> free_dram_, free_vram_, allocs_;
     std::map<uint32_t, int32_t> alloc_owner_;     // allocation -> item of the task that owns it (threads: their owner)

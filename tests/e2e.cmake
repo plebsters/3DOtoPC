@@ -7,7 +7,11 @@ if(FAKE_INPUT)
 endif()
 math(EXPR EXPECT_RC "${EXPECT} & 255")
 file(REMOVE_RECURSE ${OUT})
-execute_process(COMMAND "${CONVERTER_EXE}" convert ${ISO} ${OUT} --runtime ${RUNTIME} --name E2E
+set(extra)
+if(DEFINED EXTRA_DISC)
+    set(extra --disc ${EXTRA_DISC})
+endif()
+execute_process(COMMAND "${CONVERTER_EXE}" convert ${ISO} ${OUT} --runtime ${RUNTIME} --name E2E ${extra}
                 RESULT_VARIABLE rc)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "convert failed (${rc})")

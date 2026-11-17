@@ -8,6 +8,7 @@
 // relative paths resolve against the current directory. Matching is
 // case-insensitive, as on the 3DO.
 #include "hle_os.h"
+#include "tdort/aif.h"
 #include <fstream>
 #include <algorithm>
 #include <cctype>
@@ -75,25 +76,69 @@ bool Portfolio::resolve(const std::string& guest, std::string& host, std::string
         if (s == ".." || s == "^") { if (!clean.empty()) clean.pop_back(); continue; }
         clean.push_back(s);
     }
-    // case-insensitive walk of the host tree
-    fs::path cur = fs::u8path(rt.cfg.data_dir);
-    normalized.clear();
+    // case-insensitive walk of the host tree, on the disc in the drive
     std::error_code ec;
-    for (auto& comp : clean) {
-        fs::path next;
-        if (fs::exists(cur / fs::u8path(comp), ec)) next = cur / fs::u8path(comp);
-        else {
-            for (auto& de : fs::directory_iterator(cur, ec))
-                if (ieq(de.path().filename().u8string(), comp)) { next = de.path(); break; }
+    auto walk = [&](const fs::path& root, fs::path& found, std::string& norm) {
+        fs::path cur = root;
+        norm.clear();
+        for (auto& comp : clean) {
+            fs::path next;
+            if (fs::exists(cur / fs::u8path(comp), ec)) next = cur / fs::u8path(comp);
+            else {
+                for (auto& de : fs::directory_iterator(cur, ec))
+                    if (ieq(de.path().filename().u8string(), comp)) { next = de.path(); break; }
+            }
+            if (next.empty()) return false;
+            norm += "/" + next.filename().u8string();
+            cur = next;
         }
-        if (next.empty()) return false;
-        normalized += "/" + next.filename().u8string();
-        cur = next;
-    }
-    if (normalized.empty()) normalized = "/";
+        if (norm.empty()) norm = "/";
+        found = cur;
+        return fs::exists(cur, ec);
+    };
+    fs::path cur;
+    bool ok = walk(fs::u8path(disc_root()), cur, normalized);
+    // A multi-disc game asking for a file that only another disc has: that
+    // disc goes in, as when the player swaps discs at the game's prompt.
+    if (!ok && !clean.empty())
+        for (size_t k = 0; k < discs_.size() && !ok; ++k) {
+            if (k == disc_) continue;
+            std::string norm;
+            if (walk(fs::u8path(discs_[k]), cur, norm)) {
+                ok = true;
+                normalized = norm;
+                disc_ = k;
+                rt.log("disc %zu is now in the drive (the game asked for %s)", k + 1, guest.c_str());
+            }
+        }
+    if (!ok) return false;
     is_dir = fs::is_directory(cur, ec);
     host = cur.u8string();
-    return fs::exists(cur, ec);
+    return true;
+}
+
+// F2 in the game window: the next disc goes in (after the last, disc 1 again).
+void Portfolio::next_disc() {
+    disc_root();
+    if (discs_.size() < 2) return;
+    disc_ = (disc_ + 1) % discs_.size();
+    rt.log("disc %zu is now in the drive (F2)", disc_ + 1);
+}
+
+// The disc in the drive: data for disc 1, data_disc2, data_disc3, ... beside it.
+const std::string& Portfolio::disc_root() const {
+    if (discs_.empty()) {
+        discs_.push_back(rt.cfg.data_dir);
+        const fs::path base = fs::u8path(rt.cfg.data_dir);
+        std::error_code ec;
+        for (int k = 2; k <= 9; ++k) {
+            const fs::path d = base.parent_path() / fs::u8path(base.filename().u8string() + "_disc" + std::to_string(k));
+            if (!fs::is_directory(d, ec)) break;
+            discs_.push_back(d.u8string());
+        }
+        if (discs_.size() > 1) rt.log("multi-disc game: %zu discs", discs_.size());
+    }
+    return discs_[disc_];
 }
 
 // A DirectoryEntry for a host file or folder (what FILECMD_READDIR and
@@ -232,7 +277,7 @@ void Portfolio::load_boot_aliases() {
             rt.log("boot alias $%s = %s (%s)", key.c_str(), value.c_str(), script.filename().string().c_str());
         }
     };
-    const fs::path root = fs::u8path(rt.cfg.data_dir);
+    const fs::path root = fs::u8path(disc_root());
     // Names on the disc may differ in case.
     auto find_ci = [](const fs::path& dir, const std::vector<std::string>& parts) -> fs::path {
         fs::path cur = dir;
@@ -273,7 +318,7 @@ void Portfolio::install_file() {
         bool system_tool = false;
         if (exists) {
             std::error_code ec;
-            fs::path rel = fs::relative(fs::u8path(host), fs::u8path(rt.cfg.data_dir), ec);
+            fs::path rel = fs::relative(fs::u8path(host), fs::u8path(disc_root()), ec);
             if (!ec && !rel.empty()) {
                 std::string first = rel.begin()->string();
                 for (auto& ch : first) ch = char(std::tolower((unsigned char)ch));
@@ -301,6 +346,70 @@ void Portfolio::install_file() {
         c.r[0] = uint32_t(t.num);
     };
     fv[-5] = [load_program](Cpu*) { load_program("LoadProgram", 100); };
+    rt.register_swi(kFileSwi + 2, "FileDaemonInternals", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });
+    rt.register_swi(kFileSwi + 3, "File SWI 3", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });       // unused by the OS
+    rt.register_swi(kFileSwi + 12, "LoadOverlay", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });
+    rt.register_swi(kFileSwi + 14, "CreateLink", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });       // the disc is read-only
+
+    // ---- code modules: LoadCode / ExecuteAsSubroutine / ExecuteAsThread / UnloadCode
+    // LoadCode(path, CodeHandle *code): the AIF file in memory, 16 bytes in
+    // (the allocation size in front, for UnloadCode). The handle is the image.
+    fv[-11] = [this](Cpu*) {
+        const std::string path = rstr(arg(0));
+        const uint32_t out = arg(1);
+        std::string host, norm; bool dir = false;
+        if (!resolve(path, host, norm, dir) || dir) { rt.log("LoadCode(\"%s\"): not found", path.c_str()); c.r[0] = uint32_t(kErrNotFound); return; }
+        std::ifstream f(fs::u8path(host), std::ios::binary);
+        std::vector<uint8_t> file((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        AifImage img; std::string why;
+        if (!parse_aif(file, img, why)) { rt.log("LoadCode(\"%s\"): %s", path.c_str(), why.c_str()); c.r[0] = uint32_t(kErrNotSupported); return; }
+        const uint64_t need = std::max<uint64_t>(img.load_size(), uint64_t(img.ro_size) + img.rw_size + img.zi_size) + 64;
+        const uint32_t total = uint32_t(need) + 16;
+        const uint32_t mem = alloc(total, kMemFromTop);
+        if (!mem) { c.r[0] = uint32_t(kErrNoMem); return; }
+        w32(mem, total);
+        const uint32_t code = mem + 16;
+        rt.mem.write_block(code, img.bytes.data(), img.load_size());
+        if (out) w32(out, code);
+        rt.log("LoadCode(\"%s\") -> %08X (%u bytes)", path.c_str(), code, img.load_size());
+        c.r[0] = 0;
+    };
+    // UnloadCode(code)
+    fv[-12] = [this](Cpu*) { if (arg(0)) free_mem(arg(0) - 16); c.r[0] = 0; };
+    // ExecuteAsSubroutine(code, argc, argv) -> main()'s result. As the OS does:
+    // the AIF header's exit instruction becomes "ldmfd sp!, {r1-r12, r14, r15}",
+    // those registers are pushed, and the module runs from its header; when
+    // its main() returns, the caller continues with main()'s result in r0.
+    fv[-13] = [this](Cpu*) {
+        const uint32_t code = arg(0), argc = arg(1), argv = arg(2);
+        if (!code) { c.r[0] = uint32_t(kErrNoMem); return; }
+        w32(code + 0x10, 0xE8BDDFFEu);
+        const uint32_t ret = c.r[14];
+        uint32_t sp = c.r[13] - 14 * 4;
+        for (int r = 1; r <= 12; ++r) w32(sp + uint32_t((r - 1) * 4), c.r[r]);
+        w32(sp + 48, ret);                // r14
+        w32(sp + 52, ret);                // r15: back to the caller
+        c.r[13] = sp;
+        c.r[0] = argc; c.r[1] = argv;
+        c.r[15] = code;
+    };
+    // ExecuteAsThread(code, argc, argv, name, priority): the module as a
+    // thread of this task, with the stack size from its 3DO header.
+    fv[-14] = [this](Cpu*) {
+        const uint32_t code = arg(0);
+        if (!code) { c.r[0] = uint32_t(kErrNoMem); return; }
+        const uint32_t name_p = r32(c.r[13]);
+        const int32_t prio = int32_t(r32(c.r[13] + 4));
+        uint32_t stack = r32(code + 128 + 40);          // _3DOBinHeader._3DO_Stack
+        if (stack < 1024 || stack > 1024 * 1024) stack = 4096;
+        const uint32_t tags = alloc(5 * 8, 0);
+        if (!tags) { c.r[0] = uint32_t(kErrNoMem); return; }
+        const uint32_t tv[10] = {10 /*PC*/, code, 12 /*stack size*/, stack, 13 /*argc*/, arg(1), 14 /*argp*/, arg(2), 0, 0};
+        for (int i = 0; i < 10; ++i) w32(tags + uint32_t(i * 4), tv[i]);
+        const uint8_t pri = uint8_t(prio <= 0 ? cur().pri : std::min(prio, 254));
+        c.r[0] = uint32_t(create_task(name_p ? rstr(name_p) : "thread", tags, pri));
+        free_mem(tags);
+    };
 
     // Directories (directory.h): OpenDirectoryPath / OpenDirectoryItem return
     // a Directory handle; ReadDirectory fills a DirectoryEntry per call, then
@@ -538,10 +647,14 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
         if (!guest_range_ok(rbuf, rlen)) { complete_io(ior, kErrBadPtr, 0); return; }
         const uint64_t start = uint64_t(offset) * kBlock;
         if (start > f.file_size) { complete_io(ior, kErrEof, 0); return; }
-        // Transfers are in whole blocks; the tail of the last block past EOF reads as zero.
+        // The OS reads whole blocks straight off the disc and does not stop at the
+        // end of the file: a read past it transfers the full length (on a real
+        // disc, whatever follows the file). Movie players rely on getting the full
+        // length back (Creature Shock waits forever on a short last read). Past
+        // EOF here reads as zero.
         uint64_t avail_blocks_bytes = uint64_t(blocks) * kBlock - start;
         uint32_t len = uint32_t(std::min<uint64_t>(rlen, avail_blocks_bytes));
-        std::vector<uint8_t> buf(len, 0);
+        std::vector<uint8_t> buf(rlen, 0);
 #if defined(_WIN32)
         _fseeki64(f.fp, int64_t(start), SEEK_SET);
 #else
@@ -549,10 +662,10 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
 #endif
         size_t got = len ? std::fread(buf.data(), 1, len, f.fp) : 0;
         (void)got;
-        rt.mem.write_block(rbuf, buf.data(), len);    // invalidates any recompiled code it overwrites
+        rt.mem.write_block(rbuf, buf.data(), rlen);   // invalidates any recompiled code it overwrites
         if (rt.cfg.trace || std::getenv("TDORT_TRACE_READS"))
-            rt.log("read %s block %u: %u bytes -> %08X-%08X", f.guest_path.c_str(), offset, len, rbuf, rbuf + len);
-        complete_io(ior, 0, len);
+            rt.log("read %s block %u: %u bytes (%u from the file) -> %08X-%08X", f.guest_path.c_str(), offset, rlen, len, rbuf, rbuf + rlen);
+        complete_io(ior, 0, rlen);
         return;
     }
     case kCmdStatus: {

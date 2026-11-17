@@ -10,6 +10,7 @@
     <AssemblyName>TdoConverter</AssemblyName>
     <Product>3DO to PC</Product>
     <AssemblyTitle>3DO to PC</AssemblyTitle>
+    <ApplicationIcon>..\..\assets\3do2pc.ico</ApplicationIcon>
     <RootNamespace>TdoConverter</RootNamespace>
     <!-- Native core built by CMake (Build-App.bat does this first) -->
     <NativeBuildDir>$(MSBuildThisFileDirectory)..\..\build</NativeBuildDir>
@@ -26,6 +27,11 @@
     <!-- Optional portable compiler: put cmake\, ninja\, llvm\ under gui\toolchain\ -->
     <None Include="..\toolchain\**\*" CopyToOutputDirectory="PreserveNewest"
           LinkBase="toolchain" Condition="Exists('..\toolchain')" />
+  </ItemGroup>
+
+  <!-- The 3DO2PC icon: on the .exe (ApplicationIcon) and on every window. -->
+  <ItemGroup>
+    <Resource Include="..\..\assets\3do2pc.ico" Link="3do2pc.ico" />
   </ItemGroup>
 
 </Project>

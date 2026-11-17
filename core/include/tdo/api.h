@@ -47,6 +47,11 @@ TDO_API int32_t tdo_inspect(const char* disc_path, tdo_log_cb log, void* user);
 TDO_API int32_t tdo_convert(const tdo_convert_options* opts, tdo_log_cb log,
                             tdo_progress_cb progress, void* user);
 
+/* Extracts another disc of a multi-disc game (image or folder) into dest_dir,
+ * normally <out_dir>/data_disc2, data_disc3, ... next to the game's data folder.
+ * The runtime switches to a disc when the game asks for a file only it has. */
+TDO_API int32_t tdo_extract_disc(const char* disc_path, const char* dest_dir, tdo_log_cb log, void* user);
+
 /* Describes the compiler that would be used, e.g. "Bundled LLVM (C:\...\clang-cl.exe)".
  * Writes into buf (UTF-8). Returns 0 if a usable toolchain exists. */
 TDO_API int32_t tdo_detect_toolchain(char* buf, int32_t buf_len);

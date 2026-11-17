@@ -1,3 +1,4 @@
+#include <cstdlib>
 // hle_tasks.cpp - tasks and threads on one host thread.
 //
 // Portfolio is a priority-based preemptive kernel. Here tasks switch only at
@@ -11,6 +12,9 @@
 // When nothing can run, the frame ends; at each new frame sleeping tasks
 // whose time has come and all blocked tasks become ready again.
 #include "hle_os.h"
+
+#include <algorithm>
+#include <set>
 #include <algorithm>
 #include <fstream>
 #include <iterator>
@@ -45,6 +49,10 @@ void Portfolio::save_ctx(HleTask& t) {
 
 void Portfolio::load_ctx(HleTask& t) {
     for (int i = 0; i < 16; ++i) c.r[i] = t.r[i];
+    static const char* watch = std::getenv("TDORT_DUMP_SWITCH");   // a task name: log its frame on each switch-in
+    if (watch && t.name == watch)
+        rt.log("switch-in %s: pc=%08X sp=%08X fp=%08X [fp-12..fp-4]=%08X %08X %08X", t.name.c_str(), t.r[15], t.r[13], t.r[11],
+               t.r[11] >= 12 ? r32(t.r[11] - 12) : 0, t.r[11] >= 8 ? r32(t.r[11] - 8) : 0, t.r[11] >= 4 ? r32(t.r[11] - 4) : 0);
     c.n = t.n; c.z = t.z; c.c = t.c; c.v = t.v; c.ctl = t.ctl;
     w32(kbase_ + kbase::CurrentTask, t.addr);
     slice_start = c.cycles;
@@ -115,6 +123,17 @@ void Portfolio::raise_signal(int32_t task_item, uint32_t mask) {
 void Portfolio::task_exit(HleTask& t, const char* why) {
     rt.log("task \"%s\" ended (%s)", t.name.c_str(), why);
     t.st = HleTask::St::Dead;
+    // A task's threads end with it, as on the 3DO. Left running, they go on
+    // executing code in the program's freed memory: Jurassic Park Interactive's
+    // intro exited with its movie-streaming threads still alive, and they
+    // crashed once the next mini-game reused that memory.
+    if (owning_task(t) == t.item) {
+        std::vector<int32_t> threads;
+        for (const HleTask& o : tasks_)
+            if (o.item != t.item && o.st != HleTask::St::Dead && owning_task(o) == t.item) threads.push_back(o.item);
+        for (int32_t th : threads)
+            if (HleTask* o = task_by_item(th); o && o->st != HleTask::St::Dead) task_exit(*o, "its task ended");
+    }
     // Free the stack the kernel owns (allocated here, or handed over with
     // CREATETASK_TAG_ALLOCDTHREADSP by the C library's CreateThread). Left
     // behind, each thread's stack fragments the heap: Slam 'n Jam restarts its
@@ -128,6 +147,7 @@ void Portfolio::task_exit(HleTask& t, const char* why) {
         if (s) free_mem(s);
         t.owned_stack = 0;
     }
+    if (t.program) delete_task_items(t);
     if (t.program) free_task_memory(t.item);   // a loaded program: all it owned (threads belong to their owner)
     if (HleItem* it = item(t.item)) it->alive = false;
     if (t.parent && task_by_item(t.parent)) raise_signal(t.parent, 0x10 /*SIGF_DEADTASK*/);
@@ -142,14 +162,48 @@ void Portfolio::task_exit(HleTask& t, const char* why) {
     }
 }
 
+// When a program ends, the items it and its threads created go with it, as on
+// the 3DO: I/O requests, ports, messages, semaphores, open files, screens and
+// sound items. Folios, tasks and devices stay (a device opened by a
+// short-lived player program is still needed afterwards). Captain Quazar
+// cycles menu -> level -> movie player -> menu; the leftover items of each
+// round fragmented memory until its 590 KB stream buffer no longer fit.
+void Portfolio::delete_task_items(const HleTask& t) {
+    std::set<int32_t> owners{t.item};
+    for (const HleTask& o : tasks_) if (o.item != t.item && owning_task(o) == t.item) owners.insert(o.item);
+    std::vector<int32_t> doomed;
+    for (const HleItem& it : items_)
+        if (it.alive && it.num && it.owner_task && owners.count(it.owner_task) &&
+            it.kind != ItemKind::Folio && it.kind != ItemKind::Task && it.kind != ItemKind::Device &&
+            it.subsys != 9 /*the locale*/)
+            doomed.push_back(it.num);
+    for (int32_t n : doomed) {
+        HleItem* it = item(n);
+        if (!it || !it->alive) continue;
+        if (it->kind == ItemKind::Message && it->in_port) {        // still queued somewhere
+            if (HleItem* port = item(it->in_port)) {
+                auto& q = port->queue;
+                q.erase(std::remove(q.begin(), q.end(), n), q.end());
+            }
+            it->in_port = 0;
+        }
+        delete_item(n);
+    }
+    if (!doomed.empty()) rt.log("deleted %zu items owned by task %d", doomed.size(), t.item);
+}
+
 void Portfolio::wake_tasks() {
     if (!vbl_io_.empty()) {
-        std::vector<VblIo> done;
-        done.swap(vbl_io_);
+        std::vector<VblIo> done, later;
+        for (const VblIo& v : vbl_io_) (int32_t(frame_no_ - v.due_frame) >= 0 ? done : later).push_back(v);
+        vbl_io_.swap(later);
         const bool q = io_quick_;
         io_quick_ = false;
         for (const VblIo& v : done)
-            if (HleItem* ior = item(v.ior)) complete_io(*ior, v.err, v.actual, v.task);
+            if (HleItem* ior = item(v.ior)) {
+                if (std::getenv("TDORT_DEBUG_IO")) rt.log("complete deferred IO %d (reply port %d, msg %d) for task %d", v.ior, ior->reply_port, ior->msg_item, v.task);
+                complete_io(*ior, v.err, v.actual, v.task);
+            }
         io_quick_ = q;
     }
     for (auto& t : tasks_) {
@@ -306,8 +360,12 @@ int32_t Portfolio::start_program(const std::string& cmdline, const std::string& 
 std::string Portfolio::status_line(uint32_t frame) {
     static const char* st[] = {"ready", "blocked", "sleeping", "dead"};
     std::string out = "frame " + std::to_string(frame) + ":";
+    size_t dead = 0;
     for (size_t i = 0; i < tasks_.size(); ++i) {
         const HleTask& t = tasks_[i];
+        // ended tasks are only counted: a game that starts many threads made
+        // this line long enough to lose the counters at its end
+        if (t.st == HleTask::St::Dead) { ++dead; continue; }
         uint32_t pc = (i == cur_ && !idle_) ? c.r[15] : t.r[15];
         char b[128];
         std::snprintf(b, sizeof b, " [%s %s pc=%08X sig=%08X wait=%08X", t.name.c_str(), st[int(t.st)], pc, t.pending,
@@ -325,6 +383,7 @@ std::string Portfolio::status_line(uint32_t frame) {
         out += "]";
     }
     char b[96];
+    if (dead) { std::snprintf(b, sizeof b, " (+%zu ended)", dead); out += b; }
     std::snprintf(b, sizeof b, " cels=%llu pixels=%llu display=%08X", (unsigned long long)rt.gfx->cels_drawn,
                   (unsigned long long)rt.gfx->pixels_written, rt.gfx->display_buffer());
     out += b;

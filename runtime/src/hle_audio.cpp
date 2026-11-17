@@ -327,6 +327,21 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
         c.r[0] = uint32_t(audio_template(n));
     };
     av[-28] = [this](Cpu*) { c.r[0] = 1; };                                                 // GetNumInstruments
+    av[-47] = [this](Cpu*) { c.r[0] = uint32_t(audio_instrument(int32_t(arg(0)))); };       // CreateInstrument(template, tags)
+    av[-48] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DeleteInstrument
+    // DSP resource queries (deprecated in the SDK): nothing is reported as used.
+    av[-13] = [this](Cpu*) { c.r[0] = 0; };                                                 // DSPGetRsrcAlloc
+    av[-21] = [this](Cpu*) { c.r[0] = 0; };                                                 // DSPGetInsRsrcUsed
+    av[-22] = [this](Cpu*) { c.r[0] = 0; };                                                 // DSPGetTotalRsrcUsed
+    av[-27] = [this](Cpu*) { c.r[0] = 0; };                                                 // (reserved)
+    av[-46] = [this](Cpu*) { c.r[0] = 0; };                                                 // GetAudioFolioInfo(tags): defaults
+    // Probes read a value inside an instrument; the DSP's internals are not
+    // modelled, so a probe exists but reads 0 (ReadProbe, SWI 36).
+    av[-49] = [this](Cpu*) {                                                                // CreateProbe(ins, output, tags)
+        HleItem& p = new_item(ItemKind::Generic, kSubsysAudio, 12, 64, arg(1) ? rstr(arg(1)) : "probe", false);
+        c.r[0] = uint32_t(p.num);
+    };
+    av[-50] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DeleteProbe
 
     // ---- knobs
     av[-4] = [this](Cpu*) {                                  // GrabKnob(ins, name)
@@ -447,6 +462,10 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
 
 void Portfolio::install_audio_swis() {
     auto A = [this](uint32_t n, const char* name, HleFn fn) { rt.register_swi(kAudioSwi + n, std::string("audio:") + name, std::move(fn)); };
+    A(31, "IncrementGlobalIndex", [this](Cpu*) { c.r[0] = 0; });
+    A(34, "EnableAudioInput", [this](Cpu*) { c.r[0] = 0; });                 // no audio input: accepted, stays silent
+    A(35, "SetAudioFolioInfo", [this](Cpu*) { c.r[0] = 0; });
+    A(36, "ReadProbe", [this](Cpu*) { if (guest_range_ok(arg(1), 4)) w32(arg(1), 0); c.r[0] = 0; });
     auto knob_tweak = [this](Cpu*) {
         auto k = knobs_.find(int32_t(arg(0)));
         if (k == knobs_.end()) { c.r[0] = uint32_t(kErrBadItem); return; }
@@ -494,8 +513,11 @@ void Portfolio::install_audio_swis() {
     });
     A(10, "AllocAmplitude", [this](Cpu*) { c.r[0] = arg(0); });
     A(11, "FreeAmplitude", [this](Cpu*) { c.r[0] = 0; });
-    A(15, "SetAudioRate", [this](Cpu*) { c.r[0] = 0; });
-    A(16, "SetAudioDuration", [this](Cpu*) { c.r[0] = 0; });
+    A(15, "SetAudioRate", [this](Cpu*) { set_audio_rate(arg(1)); c.r[0] = 0; });            // (owner, frac16 Hz)
+    A(16, "SetAudioDuration", [this](Cpu*) {                                               // (owner, sample frames per tick)
+        if (arg(1)) set_audio_rate(uint32_t((44100ull << 16) / arg(1)));
+        c.r[0] = 0;
+    });
     A(18, "StartAttachment", [this](Cpu*) { rt.audio->start_attachment(int32_t(arg(0))); c.r[0] = 0; });
     A(19, "ReleaseAttachment", [this](Cpu*) { rt.audio->release_attachment(int32_t(arg(0))); c.r[0] = 0; });
     A(20, "StopAttachment", [this](Cpu*) { rt.audio->stop_attachment(int32_t(arg(0))); c.r[0] = 0; });

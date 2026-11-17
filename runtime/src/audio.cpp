@@ -426,8 +426,21 @@ float Audio::envelope_gain(Instrument& in) {
         if (t < e.points.front().second) v = float(e.points.front().first);
         g *= std::clamp(v / 32767.0f, 0.0f, 1.0f);
         a.env_ms += 1000.0 / kRate;
+        // Past the last point and not holding at a sustain point: the
+        // envelope has finished, which ends its attachment (and fires a
+        // CUE_AT_END cue; Creature Shock waits for one after its intro).
+        const bool holding = held && e.sus_end >= 0 && e.sus_end < int(e.points.size());
+        if (!holding && t >= e.points.back().second) attachment_ended(aid, a, in);
     }
     return g;
+}
+
+bool Audio::has_active_envelope(const Instrument& in) const {
+    for (int32_t aid : in.atts) {
+        auto it = atts_.find(aid);
+        if (it != atts_.end() && it->second.envelope && it->second.active) return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,9 +512,13 @@ void Audio::eval(int32_t id, Instrument& in) {
         }
         break;
     case Kind::Envelope:
-        // envelope.dsp: the level moves toward Env.request by Env.incr per
-        // frame (0 = at once); the output is that level.
-        if (running) {
+        // envelope.dsp with an envelope attached: the output follows the
+        // envelope over time. Otherwise the level moves toward Env.request
+        // by Env.incr per frame (0 = at once); the output is that level.
+        if (running && has_active_envelope(in)) {
+            in.env = envelope_gain(in) * 32767.0;
+            l = r = float(in.env / 32767.0);
+        } else if (running) {
             const double target = knob(in, "Env.request", knob(in, "Request", 0x7FFF));
             const double incr = std::max(0, knob(in, "Env.incr", knob(in, "Incr", 0)));
             if (incr <= 0 || std::fabs(target - in.env) <= incr) in.env = target;

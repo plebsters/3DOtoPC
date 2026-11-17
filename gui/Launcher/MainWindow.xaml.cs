@@ -29,6 +29,7 @@ public partial class MainWindow : Window
         _folder = _settings.GamesFolder is { Length: > 0 } f && Directory.Exists(f) ? f : GameLibrary.DefaultGamesFolder();
         SortBox.SelectedItem = SortBox.Items.Cast<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == _settings.Sort)
                                ?? SortBox.Items[0];
+        GameList.ContextMenu = BuildContextMenu();
         Loaded += (_, _) => { Rescan(); GameList.Focus(); };
         Closed += (_, _) => _settings.Save();
         _padTimer.Tick += PadTimer_Tick;
@@ -114,10 +115,17 @@ public partial class MainWindow : Window
         _gameRunning = true;
         UpdateFooter();
         WindowState = WindowState.Minimized;
+        var started = DateTime.Now;
         p.EnableRaisingEvents = true;
         p.Exited += (_, _) => Dispatcher.Invoke(() =>
         {
             _gameRunning = false;
+            int code = 0;
+            try { code = p.ExitCode; } catch { }
+            // A game that closes at once failed to start: say so instead of just reappearing.
+            StatusText.Text = (DateTime.Now - started).TotalSeconds < 5
+                ? $"{g.Name} closed right away (exit code {code}). Its tdort.log in the game folder says why."
+                : "";
             _padPrev = Gamepad.Read();   // ignore buttons still held from the game
             WindowState = WindowState.Normal;
             Activate();
@@ -164,6 +172,35 @@ public partial class MainWindow : Window
         _settings.GamesFolder = _folder;
         _settings.Save();
         Rescan();
+    }
+
+    // Built in code: WPF can't wire click handlers on a menu declared inside a style.
+    // Right-clicking a tile selects it, so the menu acts on the selected game.
+    ContextMenu BuildContextMenu()
+    {
+        var menu = new ContextMenu();
+        MenuItem Item(string header, RoutedEventHandler click, bool bold = false)
+        {
+            var mi = new MenuItem { Header = header };
+            if (bold) mi.FontWeight = FontWeights.SemiBold;
+            mi.Click += click;
+            menu.Items.Add(mi);
+            return mi;
+        }
+        Item("Play", MenuPlay_Click, bold: true);
+        Item("Open game folder", MenuOpenFolder_Click);
+        menu.Items.Add(new Separator());
+        Item("Choose box art online…", MenuChooseBoxArt_Click);
+        Item("Set cover image from file…", MenuSetCover_Click);
+        Item("Remove cover image", MenuRemoveCover_Click);
+        GameList.ContextMenuOpening += (_, e) =>
+        {
+            // Only over a tile, not the empty space around them.
+            if (e.OriginalSource is not DependencyObject d || ItemsControl.ContainerFromElement(GameList, d) is not ListBoxItem item)
+            { e.Handled = true; return; }
+            item.IsSelected = true;
+        };
+        return menu;
     }
 
     Game? MenuGame(object sender) =>

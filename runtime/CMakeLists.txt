@@ -5,6 +5,10 @@ add_library(tdort STATIC
     src/hle_kernel.cpp
     src/hle_file.cpp
     src/hle_graphics.cpp
+    src/hle_intl.cpp
+    src/hle_compress.cpp
+    src/hle_jstring.cpp
+    src/hle_report.cpp
     src/hle_input.cpp
     src/hle_tasks.cpp
     src/gfx.cpp

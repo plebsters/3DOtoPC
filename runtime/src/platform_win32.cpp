@@ -53,6 +53,7 @@ struct Win32Platform : Platform {
         case 'C': bit = PadC; break;          case 'A': bit = PadL; break;
         case 'S': bit = PadR; break;          case VK_BACK: bit = PadX; break;
         case VK_RETURN: bit = PadP; break;
+        case VK_F2: bit = PadNextDisc; break;
         }
         keys = down ? (keys | bit) : (keys & ~bit);
     }

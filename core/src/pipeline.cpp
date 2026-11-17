@@ -255,6 +255,52 @@ TDO_API int32_t tdo_inspect(const char* disc_path, tdo_log_cb log, void* user) {
     return 0;
 }
 
+// Another disc of a multi-disc game: its files go to dest_dir (data_disc2, ...),
+// where the runtime finds them when the game asks for a file on that disc.
+TDO_API int32_t tdo_extract_disc(const char* disc_path, const char* dest_dir, tdo_log_cb log, void* user) {
+    Ctx cx{log, nullptr, user};
+    if (!disc_path || !dest_dir) { cx.error("disc_path and dest_dir are required"); return 1; }
+    try {
+        std::error_code ec;
+        fs::path input = fs::u8path(disc_path);
+        const fs::path dest = fs::absolute(fs::u8path(dest_dir));
+        fs::remove_all(dest, ec);
+        fs::create_directories(dest, ec);
+        if (fs::is_directory(input, ec)) {
+            // the folder holding a LaunchMe, here or one level down; else the folder itself
+            fs::path root = input;
+            auto has_launch = [&](const fs::path& d) {
+                for (auto& de : fs::directory_iterator(d, ec))
+                    if (de.is_regular_file(ec) && ieq(de.path().filename().u8string(), "LaunchMe")) return true;
+                return false;
+            };
+            if (!has_launch(input))
+                for (auto& de : fs::directory_iterator(input, ec))
+                    if (de.is_directory(ec) && has_launch(de.path())) { root = de.path(); break; }
+            fs::copy(root, dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+            if (ec) { cx.error("copying disc files failed: " + ec.message()); return 3; }
+            cx.info("Copied " + root.u8string() + " to " + dest.u8string());
+            return 0;
+        }
+        if (lower(input.extension().u8string()) == ".cue") {
+            std::ifstream cue(input);
+            std::string line, bin;
+            while (std::getline(cue, line)) {
+                auto q1 = line.find('"'), q2 = line.rfind('"');
+                if (line.find("FILE") != std::string::npos && q1 != std::string::npos && q2 > q1) { bin = line.substr(q1 + 1, q2 - q1 - 1); break; }
+            }
+            if (bin.empty()) { cx.error("no FILE entry in cue sheet " + input.u8string()); return 2; }
+            input = input.parent_path() / fs::u8path(bin);
+        }
+        tdo::OperaDisc disc; std::string err;
+        if (!disc.open(input.u8string(), err)) { cx.error(err); return 2; }
+        cx.info(fmt("Volume \"%s\": %zu entries", disc.volume().label.c_str(), disc.entries().size()));
+        if (!disc.extract_all(dest.u8string(), err, nullptr)) { cx.error(err); return 3; }
+        cx.info("Extracted to " + dest.u8string());
+        return 0;
+    } catch (const std::exception& e) { cx.error(std::string("internal error: ") + e.what()); return 99; }
+}
+
 TDO_API int32_t tdo_convert(const tdo_convert_options* opts, tdo_log_cb log, tdo_progress_cb progress, void* user) {
     Ctx cx{log, progress, user};
     if (!opts) { cx.error("no options"); return 1; }

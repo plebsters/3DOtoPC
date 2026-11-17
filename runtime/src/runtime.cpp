@@ -73,10 +73,31 @@ Runtime::~Runtime() {
 }
 
 void Runtime::log(const char* fmt, ...) {
-    char buf[1024];
+    char small[1024];
+    std::vector<char> big;
+    const char* buf = small;
     va_list ap; va_start(ap, fmt);
-    std::vsnprintf(buf, sizeof buf, fmt, ap);
+    va_list ap2; va_copy(ap2, ap);
+    const int n = std::vsnprintf(small, sizeof small, fmt, ap);
     va_end(ap);
+    if (n >= int(sizeof small)) {          // long lines (task status) are written whole
+        big.resize(size_t(n) + 1);
+        std::vsnprintf(big.data(), big.size(), fmt, ap2);
+        buf = big.data();
+    }
+    va_end(ap2);
+    {   // remember problems for the diagnosis report
+        static const char* keys[] = {"not found", "out of memory", "unimplemented", "not supported", "failed", "HLE stub", "refused"};
+        for (const char* k : keys) {
+            if (!std::strstr(buf, k)) continue;
+            std::string key(buf);
+            if (key.size() > 160) key.resize(160);
+            auto it = problems.find(key);
+            if (it != problems.end()) ++it->second.first;
+            else if (problems.size() < 60) problems[key] = {1u, frames_};
+            break;
+        }
+    }
     // A game polling in a loop can repeat one line millions of times: show the
     // first few, then only a running count.
     static std::string last;
@@ -138,6 +159,7 @@ bool Runtime::load_game(std::string& err) {
     if (recomp_enabled_) install_recompiled();
 
     os = std::make_unique<Portfolio>(*this, img);   // sets r5/r6/r7, sp, sl
+    if (const char* dump = std::getenv("TDORT_DUMP_API")) dump_api(dump);
 
     // The AIF zero-init routine starts with a "debug initialisation" instruction
     // at +0x40; when it is a SWI it only notifies a debugger, so it must not
@@ -145,6 +167,17 @@ bool Runtime::load_game(std::string& err) {
     const uint32_t dbg_insn = load_be32(&img.bytes[0x40]);
     if ((dbg_insn & 0x0F000000u) == 0x0F000000u && !swis_.count(dbg_insn & 0xFFFFFF))
         register_swi(dbg_insn & 0xFFFFFF, "AIF debug init (ignored)", [](Cpu*) {});
+
+    // The same debug-init SWI (0x10A) heads programs a game loads later.
+    if (!swis_.count(0x10A)) register_swi(0x10A, "AIF debug init (ignored)", [](Cpu*) {});
+    // SWIs 0x100-0x1FF belong to the debugger folio. On a retail console it
+    // isn't installed and the OS hands them to the ROM, which ignores them and
+    // leaves the registers alone (Madden uses 0x103/0x104 around its cel drawing).
+    for (uint32_t n = 0x100; n < 0x200; ++n)
+        if (!swis_.count(n)) register_swi(n, "debugger SWI (ignored)", [](Cpu*) {});
+    // SWI 0x10: the C library's start-up asks for its environment (command
+    // line, memory limit); answering 0 lets it use its defaults.
+    if (!swis_.count(0x10)) register_swi(0x10, "GetEnv (defaults)", [this](Cpu*) { cpu.r[0] = 0; });
 
     // The AIF header word at +0x10 is the program-exit instruction (a SWI).
     const uint32_t exit_insn = load_be32(&img.bytes[0x10]);
@@ -232,7 +265,7 @@ bool Runtime::check_pc(uint32_t pc) {
     if (!entered_ && pc == entry_) entered_ = true;
     if (entered_ && pc >= image_lo_ && pc < image_lo_ + 0x80 && pc != image_lo_ + 0x10 /* AIF exit instruction */)
         { crash("jump into the AIF header (likely a call through a NULL or uninitialised function pointer)", pc); return false; }
-    if (pc >= kStackTop - kStackSize && pc < kDramSize)
+    if (pc >= kStackTop - kStackSize && pc < kDramSize && !(pc >= hle_code_lo_ && pc < hle_code_hi_))
         { crash("jump into the stack / OS data area", pc); return false; }
     if (pc >= kRamEnd)
         { crash("jump outside RAM", pc); return false; }
@@ -245,6 +278,7 @@ void Runtime::crash(const char* reason, uint32_t pc) {
     cpu.halted = true;
     log("==================== CRASH ====================");
     log("reason: %s", reason);
+    { char b[200]; std::snprintf(b, sizeof b, "%s at %08X", reason, pc); crash_reason = b; }
     log("pc=%08X  cpsr=%08X  cycles=%llu", pc, cpu.cpsr(), (unsigned long long)cpu.cycles);
     for (int i = 0; i < 16; i += 4)
         log("r%-2d=%08X  r%-2d=%08X  r%-2d=%08X  r%-2d=%08X", i, cpu.r[i], i + 1, cpu.r[i + 1],
@@ -277,17 +311,36 @@ void Runtime::crash(const char* reason, uint32_t pc) {
 }
 
 int Runtime::run(Platform* platform) {
-    const uint64_t per_frame = cfg.cpu_hz / cfg.refresh_hz;
+    // Instructions per frame: the ARM60 runs 12.5 MHz from DRAM with no cache,
+    // so an instruction takes about cfg.cpi cycles on average.
+    static const double cpi = [this] { const char* e = std::getenv("TDORT_CPI"); return e ? std::max(0.25, std::atof(e)) : cfg.cpi; }();
+    const uint64_t per_frame = uint64_t(double(cfg.cpu_hz) / cfg.refresh_hz / cpi);
+    uint32_t busy_frames = 0;
+    static const bool speed_trace = std::getenv("TDORT_SPEED_TRACE") != nullptr;
     std::vector<int16_t> mixbuf;
     const int audio_frames = Audio::kRate / int(cfg.refresh_hz);
     mixbuf.resize(size_t(audio_frames) * 2);
     while (!cpu.halted) {
         if (!platform->pump()) break;
         pad_state = platform->pad();
+        {   // F2: next disc (for games that notice a disc change some other way)
+            static uint32_t prev = 0;
+            if ((pad_state & PadNextDisc) && !(prev & PadNextDisc) && os) os->next_disc();
+            prev = pad_state;
+        }
         if (os) os->frame(pad_state);
         if (os && ++frames_ % 120 == 0 && (frames_ <= 120 * 30 || std::getenv("TDORT_AUDIO_STATUS")))
             log("%s", os->status_line(frames_).c_str());
+        const uint64_t frame_start = cpu.cycles;
         run_for(per_frame);
+        // Time passes while the game waits for the vertical blank, just as the
+        // real clock keeps running while the CPU idles. Without this the clock
+        // (timer device, SampleSystemTime) only counted executed instructions,
+        // so a game that mostly waits saw seconds take minutes: Jurassic Park
+        // Interactive held its "3 seconds" copyright screen forever.
+        if (cpu.cycles < frame_start + per_frame) cpu.cycles = frame_start + per_frame;
+        else ++busy_frames;          // the game used the whole frame: it runs as fast as the CPU allows
+        if (speed_trace && frames_ % 120 == 0) { log("speed: %u of the last 120 frames used all the CPU", busy_frames); busy_frames = 0; }
         // Debugging aid: TDORT_DUMPMEM=frame:addr:len writes guest memory to mem_<frame>.bin.
         if (const char* dm = std::getenv("TDORT_DUMPMEM")) {
             unsigned f = 0, a = 0, l = 0;
@@ -296,10 +349,20 @@ int Runtime::run(Platform* platform) {
                 if (FILE* fp = std::fopen(name, "wb")) { std::fwrite(&mem.ram[a], 1, l, fp); std::fclose(fp); }
             }
         }
-        platform->present(gfx->scan_out(), Gfx::kWidth, Gfx::kHeight);
+        const uint32_t* pixels = gfx->scan_out();
+        if (frames_ % 10 == 0) {     // when the picture last changed, for the diagnosis report
+            uint64_t h = 1469598103934665603ull;
+            for (int i = 0; i < Gfx::kWidth * Gfx::kHeight; i += 7) h = (h ^ pixels[i]) * 1099511628211ull;
+            if (h != screen_hash_) { screen_hash_ = h; screen_change_frame_ = frames_; }
+        }
+        platform->present(pixels, Gfx::kWidth, Gfx::kHeight);
         audio->mix(mixbuf.data(), audio_frames);
         platform->queue_audio(mixbuf.data(), audio_frames);
         platform->wait_frame(cfg.refresh_hz);
+    }
+    if (os) {
+        const std::string verdict = os->write_report(crashed ? "crashed" : cpu.halted ? "exited" : "stopped", screen_change_frame_);
+        log("diagnosis: %s", verdict.c_str());
     }
     if (crashed) { platform->fatal(crash_message.c_str()); return 3; }
     log("guest %s, r0=%u", cpu.halted ? "exited" : "stopped", cpu.r[0]);
@@ -308,26 +371,50 @@ int Runtime::run(Platform* platform) {
 
 // ---- HLE plumbing ---------------------------------------------------------
 
-void Runtime::register_swi(uint32_t number, std::string name, HleFn fn) {
-    swis_[number] = HleEntry{std::move(name), std::move(fn)};
+void Runtime::register_swi(uint32_t number, std::string name, HleFn fn, bool stub) {
+    swis_[number] = HleEntry{std::move(name), std::move(fn), 0, stub};
 }
 
-uint32_t Runtime::register_trap(std::string name, HleFn fn) {
-    traps_.push_back(HleEntry{std::move(name), std::move(fn)});
+uint32_t Runtime::register_trap(std::string name, HleFn fn, bool stub) {
+    traps_.push_back(HleEntry{std::move(name), std::move(fn), 0, stub});
     return kTrapBase + uint32_t(traps_.size() - 1) * 4;
+}
+
+// TDORT_DUMP_API=file: the OS calls this runtime provides, for checking
+// against the 3DO's own tables (tools/api_coverage.py).
+void Runtime::dump_api(const char* path) const {
+    FILE* f = std::fopen(path, "w");
+    if (!f) return;
+    for (const auto& t : traps_) std::fprintf(f, "vector\t%s\t%s\n", t.name.c_str(), t.stub ? "stub" : "impl");
+    for (const auto& [n, e] : swis_) std::fprintf(f, "swi\t%06X\t%s\t%s\n", n, e.name.c_str(), e.stub ? "stub" : "impl");
+    std::fclose(f);
 }
 
 // True if this exact call (site and first two arguments) was logged recently:
 // retried waits would otherwise flood the history.
 bool Runtime::repeat_call(uint32_t site, uint32_t a0, uint32_t a1) {
+    static const bool all = std::getenv("TDORT_TRACE_ALL") != nullptr;   // log every call, repeats included
+    if (all) return false;
     const uint64_t key = (uint64_t(site) << 32) ^ (uint64_t(a0) * 2654435761u) ^ a1;
     for (uint64_t k : recent_calls_) if (k == key) return true;
     recent_calls_[recent_pos_++ % 16] = key;
     return false;
 }
 
+// TDORT_WATCH=<hex address>: logs when that word changes, checked at each OS
+// call (so the change happened since the previous call).
+static void watch_check(Runtime& rt, const char* what) {
+    static const uint32_t addr = [] { const char* w = std::getenv("TDORT_WATCH"); return w ? uint32_t(std::strtoul(w, nullptr, 16)) : 0u; }();
+    static uint32_t last = 0; static bool init = false;
+    if (!addr || addr + 4 > kRamEnd) return;
+    const uint32_t v = load_be32(&rt.mem.ram[addr]);
+    if (!init) { init = true; last = v; return; }
+    if (v != last) { rt.log("watch %08X: %08X -> %08X before %s (pc=%08X lr=%08X)", addr, last, v, what, rt.cpu.r[15], rt.cpu.r[14]); last = v; }
+}
+
 bool Runtime::handle_swi(uint32_t comment, uint32_t pc) {
     ++stats.hle_calls;
+    { char w[32]; std::snprintf(w, sizeof w, "SWI %X", comment); watch_check(*this, w); }
     auto it = swis_.find(comment);
     if (it == swis_.end()) {
         if (unknown_swis_.insert(comment).second)
@@ -340,6 +427,7 @@ bool Runtime::handle_swi(uint32_t comment, uint32_t pc) {
     if ((cfg.trace || stats.hle_calls <= kHistoryCalls) && !repeat_call(pc, cpu.r[0], cpu.r[1]))
         log("call %llu: %s(%08X, %08X, %08X, %08X) at %08X", (unsigned long long)stats.hle_calls,
             it->second.name.c_str(), cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], pc);
+    if (os) os->note_call(it->second.name.c_str(), cpu.r, pc);
     cpu.r[15] = pc + 4;          // handlers may redirect by writing r15
     retry_pc = pc;
     it->second.fn(&cpu);
@@ -349,11 +437,13 @@ bool Runtime::handle_swi(uint32_t comment, uint32_t pc) {
 void Runtime::handle_trap(uint32_t addr) {
     ++stats.hle_calls;
     uint32_t idx = (addr - kTrapBase) / 4;
+    watch_check(*this, idx < traps_.size() ? traps_[idx].name.c_str() : "trap");
     const uint32_t ret = cpu.r[14];
     cpu.r[15] = ret;             // default: behave like a function that returns
     retry_pc = addr;             // a blocked vector call re-enters the trap (lr unchanged)
     if (idx < traps_.size()) {
         ++traps_[idx].calls;
+        if (os) os->note_call(traps_[idx].name.c_str(), cpu.r, ret - 4);
         if ((cfg.trace || stats.hle_calls <= kHistoryCalls) && !repeat_call(ret - 4, cpu.r[0], cpu.r[1]))
             log("call %llu: %s(%08X, %08X, %08X, %08X) from %08X", (unsigned long long)stats.hle_calls,
                 traps_[idx].name.c_str(), cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], ret - 4);
@@ -369,6 +459,19 @@ uint32_t Runtime::hle_alloc(uint32_t size, uint32_t align) {
     if (a + size > hle_heap_end_) { log("HLE heap exhausted"); return 0; }
     hle_heap_ = a + size;
     std::memset(&mem.ram[a], 0, size);
+    return a;
+}
+
+uint32_t Runtime::hle_code(const uint32_t* words, size_t count) {
+    const uint32_t a = hle_alloc(uint32_t(count * 4));
+    if (!a) return 0;
+    for (size_t i = 0; i < count; ++i) {
+        mem.ram[a + i * 4] = uint8_t(words[i] >> 24); mem.ram[a + i * 4 + 1] = uint8_t(words[i] >> 16);
+        mem.ram[a + i * 4 + 2] = uint8_t(words[i] >> 8); mem.ram[a + i * 4 + 3] = uint8_t(words[i]);
+    }
+    if (!hle_code_lo_) hle_code_lo_ = a;
+    hle_code_lo_ = std::min(hle_code_lo_, a);
+    hle_code_hi_ = std::max(hle_code_hi_, a + uint32_t(count * 4));
     return a;
 }
 

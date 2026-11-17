@@ -2,6 +2,7 @@
 // hle_graphics.cpp - Graphics folio replacement (screen groups, display,
 // CEL entry points) plus the other folios games open at start-up.
 #include "hle_os.h"
+#include "font8x8.h"
 #include "tdort/gfx.h"
 #include <algorithm>
 #include <cmath>
@@ -99,6 +100,41 @@ int32_t Portfolio::draw_cels(int32_t bitmap_item, uint32_t ccb) {
     return 0;
 }
 
+// One pixel into a bitmap (LR form), clipped to its clip window; coordinates
+// count from the clip origin, as for cels.
+void Portfolio::plot(int32_t bitmap_item, int32_t x, int32_t y, uint16_t pen) {
+    HleItem* bm = item(bitmap_item);
+    if (!bm || bm->kind != ItemKind::Bitmap) return;
+    const uint32_t buf = r32(bm->addr + bitmap::Buffer);
+    const int32_t w = int32_t(r32(bm->addr + bitmap::Width)), h = int32_t(r32(bm->addr + bitmap::Height));
+    const int32_t cx = int32_t(r32(bm->addr + bitmap::ClipX)), cy = int32_t(r32(bm->addr + bitmap::ClipY));
+    int32_t cw = int32_t(r32(bm->addr + bitmap::ClipWidth)), ch = int32_t(r32(bm->addr + bitmap::ClipHeight));
+    if (cw <= 0) cw = w; if (ch <= 0) ch = h;
+    x += cx; y += cy;
+    if (x < cx || y < cy || x >= std::min(cx + cw, w) || y >= std::min(cy + ch, h)) return;
+    const uint32_t a = buf + uint32_t(((y >> 1) * w + x) * 4 + ((y & 1) ? 2 : 0));
+    if (a < kRamEnd - 1) { rt.mem.ram[a] = uint8_t(pen >> 8); rt.mem.ram[a + 1] = uint8_t(pen); rt.mem.invalidate(a, 2); }
+}
+
+int32_t Portfolio::draw_text(uint32_t gc, int32_t bitmap_item, const std::vector<uint32_t>& text) {
+    if (!gc) return kErrBadPtr;
+    HleItem* bm = item(bitmap_item);
+    if (!bm || bm->kind != ItemKind::Bitmap) return kErrBadItem;
+    const uint16_t pen = uint16_t(r32(gc + kGcFGPen));
+    const int32_t x_start = int32_t(r32(gc + kGcPenX));
+    int32_t x = x_start, y = int32_t(r32(gc + kGcPenY));
+    for (uint32_t ch : text) {
+        if (ch == '\n') { x = x_start; y += 8; continue; }
+        const uint8_t* g = kFont8x8[(ch >= 32 && ch < 127) ? ch - 32 : '?' - 32];
+        for (int r = 0; r < 8; ++r)
+            for (int b = 0; b < 8; ++b)
+                if (g[r] & (0x80 >> b)) plot(bitmap_item, x + b, y + r, pen);
+        x += 8;
+    }
+    w32(gc + kGcPenX, uint32_t(x)); w32(gc + kGcPenY, uint32_t(y));
+    return 0;
+}
+
 void Portfolio::install_graphics() {
     std::map<int32_t, HleFn> v;
     v[gvCreateScreenGroup] = [this](Cpu*) { c.r[0] = uint32_t(create_screen_group(arg(0), arg(1))); };
@@ -115,7 +151,7 @@ void Portfolio::install_graphics() {
     };
     v[gvWritePixel]        = [this](Cpu*) {                // WritePixel(bitmap, gc, x, y): foreground pen
         const uint32_t a = pixel_address(int32_t(arg(0)), int32_t(arg(2)), int32_t(arg(3)));
-        const uint32_t pen = arg(1) ? r32(arg(1)) : 0x7FFF;   // GrafCon gc_FGPen is its first field
+        const uint32_t pen = arg(1) ? r32(arg(1) + kGcFGPen) : 0x7FFF;   // GrafCon: Node, then gc_FGPen
         if (a && guest_range_ok(a, 2)) { rt.mem.ram[a] = uint8_t(pen >> 8); rt.mem.ram[a + 1] = uint8_t(pen); rt.mem.invalidate(a, 2); }
         c.r[0] = 0;
     };
@@ -150,7 +186,7 @@ void Portfolio::install_graphics() {
         int32_t cx = int32_t(r32(bm->addr + bitmap::ClipX)), cy = int32_t(r32(bm->addr + bitmap::ClipY));
         int32_t cw = int32_t(r32(bm->addr + bitmap::ClipWidth)), ch = int32_t(r32(bm->addr + bitmap::ClipHeight));
         if (cw <= 0) cw = w; if (ch <= 0) ch = h;
-        const uint16_t pen = uint16_t(arg(1) ? r32(arg(1)) : 0);
+        const uint16_t pen = uint16_t(arg(1) ? r32(arg(1) + kGcFGPen) : 0);   // GrafCon: Node, then the pens
         const int32_t x0 = std::max(int32_t(r32(arg(2))) + cx, cx), y0 = std::max(int32_t(r32(arg(2) + 4)) + cy, cy);
         const int32_t x1 = std::min(int32_t(r32(arg(2) + 8)) + cx, std::min(cx + cw, w) - 1);
         const int32_t y1 = std::min(int32_t(r32(arg(2) + 12)) + cy, std::min(cy + ch, h) - 1);
@@ -197,13 +233,133 @@ void Portfolio::install_graphics() {
         c.r[0] = (scr && !scr->children.empty()) ? uint32_t(draw_cels(scr->children[0], arg(1))) : uint32_t(kErrBadItem);
     };
     for (int32_t ok : {gvSetCEControl, gvSetCEWatchdog, gvResetScreenColors, gvSetScreenColor, gvSetScreenColors,
-                       gvEnableVAvg, gvDisableVAvg, gvEnableHAvg, gvDisableHAvg, gvSetVBLAttrs, gvGetVBLAttrs,
-                       gvSetFGPen, gvSetBGPen, gvMoveTo})
+                       gvEnableVAvg, gvDisableVAvg, gvEnableHAvg, gvDisableHAvg, gvSetVBLAttrs, gvGetVBLAttrs})
         v[ok] = [this, ok](Cpu*) {
             if (rt.cfg.trace) rt.log("Graphics[%d] accepted", ok);
             c.r[0] = 0;
         };
+    // MapCel(ccb, Point quad[4]): sets the cel's position and slopes so its
+    // corners land on the quad (top-left, top-right, bottom-right, bottom-left),
+    // using the CCB's width and height. Row v starts at XY + v*VD and steps
+    // by HD + v*HDD; solving for the four corners gives the fields below
+    // (HD, HDD in 12.20 fixed point, VD and the position in 16.16).
+    v[gvMapSprite] = [this](Cpu*) {
+        const uint32_t ccbp = arg(0), q = arg(1);
+        const int64_t w = std::max<int32_t>(1, int32_t(r32(ccbp + ccb::Width)));
+        const int64_t h = std::max<int32_t>(1, int32_t(r32(ccbp + ccb::Height)));
+        int64_t x[4], y[4];
+        for (int i = 0; i < 4; ++i) { x[i] = int32_t(r32(q + i * 8)); y[i] = int32_t(r32(q + i * 8 + 4)); }
+        w32(ccbp + ccb::XPos, uint32_t(int32_t(x[0] << 16)));
+        w32(ccbp + ccb::YPos, uint32_t(int32_t(y[0] << 16)));
+        w32(ccbp + ccb::HDX,  uint32_t(int32_t(((x[1] - x[0]) << 20) / w)));
+        w32(ccbp + ccb::HDY,  uint32_t(int32_t(((y[1] - y[0]) << 20) / w)));
+        w32(ccbp + ccb::VDX,  uint32_t(int32_t(((x[3] - x[0]) << 16) / h)));
+        w32(ccbp + ccb::VDY,  uint32_t(int32_t(((y[3] - y[0]) << 16) / h)));
+        w32(ccbp + ccb::HDDX, uint32_t(int32_t(((x[2] - x[3] - x[1] + x[0]) << 20) / (w * h))));
+        w32(ccbp + ccb::HDDY, uint32_t(int32_t(((y[2] - y[3] - y[1] + y[0]) << 20) / (w * h))));
+    };
+    // SetReadAddress(bitmap, buffer, width) / ResetReadAddress(bitmap): where the
+    // cel engine reads the background for blended pixels. The renderer blends
+    // against the bitmap it draws into, which is what these restore by default;
+    // the setting is kept so it reads back consistently.
+    v[gvSetReadAddress] = [this](Cpu*) { read_address_[int32_t(arg(0))] = {arg(1), arg(2)}; c.r[0] = 0; };
+    v[gvResetReadAddress] = [this](Cpu*) { read_address_.erase(int32_t(arg(0))); c.r[0] = 0; };
+    // QueryGraphics(tag, ret) / QueryGraphicsList(tags): facts about the display.
+    // This is an NTSC console: 60 fields a second, 320x240.
+    auto query = [this](uint32_t tag, uint32_t& out) -> bool {
+        switch (tag) {
+            case 1: out = 60; return true;                 // QUERYGRAF_TAG_FIELDFREQ
+            case 2: out = 16667; return true;              // FIELDTIME (microseconds)
+            case 3: out = frame_no_; return true;          // FIELDCOUNT
+            case 4: out = 320; return true;                // DEFAULTWIDTH
+            case 5: out = 240; return true;                // DEFAULTHEIGHT
+            case 6: out = 1; return true;                  // DEFAULTDISPLAYTYPE: DI_TYPE_NTSC
+            default: return false;
+        }
+    };
+    v[gvQueryGraphics] = [this, query](Cpu*) {
+        uint32_t val = 0;
+        if (!query(arg(0), val)) { c.r[0] = uint32_t(kErrNotSupported); return; }
+        if (guest_range_ok(arg(1), 4)) w32(arg(1), val);
+        c.r[0] = 0;
+    };
+    v[gvQueryGraphicsList] = [this, query](Cpu*) {
+        int32_t err = 0;
+        each_tag(arg(0), [&](uint32_t t, uint32_t a) {
+            uint32_t val = 0;
+            if (!query(t, val)) { err = kErrNotSupported; return; }
+            if (guest_range_ok(a, 4)) w32(a, val);
+        });
+        c.r[0] = uint32_t(err);
+    };
+    // ---- pens, lines and text. GrafCon = { Node (20 bytes), FGPen, BGPen, PenX, PenY, Flags }.
+    v[gvSetFGPen] = [this](Cpu*) { if (arg(0)) w32(arg(0) + kGcFGPen, arg(1)); };          // SetFGPen(gc, color)
+    v[gvSetBGPen] = [this](Cpu*) { if (arg(0)) w32(arg(0) + kGcBGPen, arg(1)); };          // SetBGPen(gc, color)
+    v[gvMoveTo]   = [this](Cpu*) { if (arg(0)) { w32(arg(0) + kGcPenX, arg(1)); w32(arg(0) + kGcPenY, arg(2)); } };
+    // DrawTo(bitmap, gc, x, y): a line in the foreground pen from the pen
+    // position to (x, y), which becomes the new pen position.
+    v[gvDrawTo] = [this](Cpu*) {
+        const uint32_t gc = arg(1);
+        if (!gc) { c.r[0] = uint32_t(kErrBadPtr); return; }
+        int32_t x0 = int32_t(r32(gc + kGcPenX)), y0 = int32_t(r32(gc + kGcPenY));
+        const int32_t x1 = int32_t(arg(2)), y1 = int32_t(arg(3));
+        const uint16_t pen = uint16_t(r32(gc + kGcFGPen));
+        const int32_t dx = std::abs(x1 - x0), dy = -std::abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+        int32_t err = dx + dy;
+        for (int guard = 0; guard < 4096; ++guard) {
+            plot(int32_t(arg(0)), x0, y0, pen);
+            if (x0 == x1 && y0 == y1) break;
+            const int32_t e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x0 += sx; }
+            if (e2 <= dx) { err += dx; y0 += sy; }
+        }
+        w32(gc + kGcPenX, uint32_t(x1)); w32(gc + kGcPenY, uint32_t(y1));
+        c.r[0] = 0;
+    };
+    // DrawChar(gc, bitmap, char) / DrawText8(gc, bitmap, text) / DrawText16(gc, bitmap, text):
+    // the built-in 8x8 font in the foreground pen, at the pen position (top
+    // left), which moves on by 8 pixels per character.
+    v[gvDrawChar]   = [this](Cpu*) { c.r[0] = uint32_t(draw_text(arg(0), int32_t(arg(1)), {arg(2)})); };
+    v[gvDrawText8]  = [this](Cpu*) {
+        std::vector<uint32_t> t;
+        for (uint32_t a = arg(2); a && guest_range_ok(a, 1) && r8(a) && t.size() < 4096; ++a) t.push_back(r8(a));
+        c.r[0] = uint32_t(draw_text(arg(0), int32_t(arg(1)), t));
+    };
+    v[gvDrawText16] = [this](Cpu*) {
+        std::vector<uint32_t> t;
+        for (uint16_t ch : read_ustr(arg(2))) t.push_back(ch);
+        c.r[0] = uint32_t(draw_text(arg(0), int32_t(arg(1)), t));
+    };
+    // Font: { uint8 height, uint8 flags, CCB *ccb, FontEntry *entries }.
+    font_ = rt.hle_alloc(12);
+    w8(font_, 8); w8(font_ + 1, 0x01 /*FONT_ASCII*/);
+    v[gvGetCurrentFont]    = [this](Cpu*) { c.r[0] = font_; };
+    v[gvSetCurrentFontCCB] = [this](Cpu*) { w32(font_ + 4, arg(0)); c.r[0] = 0; };
+    v[gvResetFont]         = [this](Cpu*) { w32(font_ + 4, 0); c.r[0] = 0; };
+    // ReadCLUTColor(index): the default colour table, a linear ramp.
+    v[gvReadVDLColor] = [this](Cpu*) {
+        const uint32_t i = arg(0) & 31, val = (i << 3) | (i >> 2);
+        c.r[0] = (val << 16) | (val << 8) | val;
+    };
+    v[gvGetFirstDisplayInfo] = [this](Cpu*) { c.r[0] = 0; };                                   // no extra display types
+    v[gvDisplayOverlay] = [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); };                // overlays: not available
     graphics_base_ = make_folio("Graphics", kSubsysGraphics, 128, v);
+    // Most graphics calls also exist as SWIs; programs built with SDKs that call
+    // them directly reach the same code (SWI number -> vector, from the OS's tables).
+    static const std::pair<uint32_t, int32_t> swi_vec[] = {
+        {1, gvSetReadAddress}, {2, gvResetReadAddress}, {3, gvSetClipOrigin}, {5, gvEnableVAvg},
+        {6, gvDisableVAvg}, {7, gvEnableHAvg}, {8, gvDisableHAvg}, {9, gvSetScreenColor},
+        {10, gvResetScreenColors}, {13, gvSetScreenColors}, {17, gvAddScreenGroup}, {18, gvRemoveScreenGroup},
+        {19, gvSetClipWidth}, {20, gvSetClipHeight}, {29, gvDrawText16}, {31, gvDrawChar}, {33, gvDrawTo},
+        {35, gvFillRect}, {36, gvSetCurrentFontCCB}, {37, gvGetCurrentFont}, {38, gvDrawText8},
+        {41, gvSetCEControl}, {42, gvSetCEWatchdog}, {45, gvDisplayScreen}, {47, gvSetVDL},
+        {50, gvCreateScreenGroup}, {51, gvModifyVDL}, {52, gvSetVBLAttrs}, {53, gvGetVBLAttrs}, {14, gvResetFont},
+    };
+    rt.register_swi(kGraphicsSwi + 27, "OpenRAMFont", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });   // the built-in font only
+    for (auto [n, vec] : swi_vec) {
+        auto f = v.find(vec);
+        if (f != v.end()) rt.register_swi(kGraphicsSwi + n, "Graphics SWI " + std::to_string(n), f->second);
+    }
     // Fields games read directly from the folio structure.
     const uint32_t g = graphics_base_;
     w32(g + graffolio::VRAMPageSize, 2048);
@@ -222,7 +378,21 @@ void Portfolio::install_graphics() {
     });
 }
 
-uint32_t Portfolio::audio_ticks() const { return frame_no_ * 4; }   // 240 Hz at 60 frames/s
+// The audio clock: 240 Hz unless the game sets another rate (SetAudioRate,
+// SetAudioDuration), counted from the frame number at 60 frames a second.
+// Crash 'n Burn runs it at 128 Hz and times its music by it; at a fixed
+// 240 Hz the music played almost twice too fast.
+uint32_t Portfolio::audio_ticks() const {
+    const uint64_t elapsed = uint64_t(frame_no_ - audio_rate_frame_) * audio_rate_;   // ticks << 16, times 60
+    return audio_rate_ticks_ + uint32_t(elapsed / (60ull << 16));
+}
+
+void Portfolio::set_audio_rate(uint32_t rate16) {
+    rate16 = std::clamp<uint32_t>(rate16, 60u << 16, 1000u << 16);   // the folio's range: 60-1000 Hz
+    audio_rate_ticks_ = audio_ticks();
+    audio_rate_frame_ = frame_no_;
+    audio_rate_ = rate16;
+}
 
 uint32_t Portfolio::cue_signal(int32_t cue) {
     auto it = cue_signals_.find(cue);
@@ -244,7 +414,7 @@ void Portfolio::audio_sleep_until(uint32_t ticks) {
     const uint32_t now = audio_ticks();
     if (std::getenv("TDORT_SLEEP_TRACE")) rt.log("sleep-until %u now %u (%+d)", ticks, now, int32_t(ticks - now));
     if (int32_t(ticks - now) <= 0) return;
-    const uint32_t frames = (ticks - now + 3) / 4;
+    const uint32_t frames = uint32_t((uint64_t(ticks - now) * (60ull << 16) + audio_rate_ - 1) / audio_rate_);
     if (multitasking()) sleep_until(frame_no_ + frames);
     else rt.request_vblank_wait();
 }
@@ -257,8 +427,8 @@ void Portfolio::install_other_folios() {
     // even when every task is waiting.
     std::map<int32_t, HleFn> av;
     av[-42] = [this](Cpu*) { c.r[0] = audio_ticks(); };                          // GetAudioTime()
-    av[-15] = [this](Cpu*) { c.r[0] = 240u << 16; };                             // GetAudioRate() (16.16)
-    av[-16] = [this](Cpu*) { c.r[0] = 1; };                                      // GetAudioDuration()
+    av[-15] = [this](Cpu*) { c.r[0] = audio_rate_; };                            // GetAudioRate() (16.16 Hz)
+    av[-16] = [this](Cpu*) { c.r[0] = uint32_t(((44100ull << 16) + audio_rate_ / 2) / audio_rate_); };   // GetAudioDuration(): sample frames per tick
     av[-19] = [this](Cpu*) { c.r[0] = 0; };                                      // OwnAudioClock()
     av[-20] = [this](Cpu*) { c.r[0] = 0; };                                      // DisownAudioClock()
     av[-18] = [this](Cpu*) { c.r[0] = cue_signal(int32_t(arg(0))); };            // GetCueSignal(cue)
@@ -297,9 +467,9 @@ void Portfolio::install_other_folios() {
     mv[-8] = [this, sdiv](Cpu*) { c.r[0] = uint32_t(sdiv(0x10000, int32_t(arg(0)), nullptr)); };            // RecipSF16
     make_folio("Operamath", kSubsysMath, 64, mv);
     install_math_swis();
-    make_folio("International", kSubsysKernel, 32, {});
-    make_folio("Compression", kSubsysKernel, 32, {});
-    make_folio("JString", kSubsysKernel, 32, {});
+    install_international();
+    install_compression();
+    install_jstring();
 
     // Audio SWIs, named so the log reads as an implementation checklist.
     static const std::pair<uint32_t, const char*> audio[] = {
@@ -315,7 +485,7 @@ void Portfolio::install_other_folios() {
     };
     for (auto& [n, name] : audio) {
         std::string nm = std::string("audio:") + name;
-        rt.register_swi(kAudioSwi + n, nm, [this, nm](Cpu*) { stub(nm); });
+        rt.register_swi(kAudioSwi + n, nm, [this, nm](Cpu*) { stub(nm); }, true);
     }
     install_audio_swis();
     // SignalAtTime(cue, time): raise the cue's signal when the clock gets there.

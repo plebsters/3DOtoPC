@@ -142,6 +142,7 @@ private:
     int32_t decode(Attachment& a, const Sample& s, int64_t frame, int ch);
     void  attachment_ended(int32_t id, Attachment& a, Instrument& in);
     float envelope_gain(Instrument& in);
+    bool  has_active_envelope(const Instrument& in) const;
     int32_t knob(const Instrument& in, const char* name, int32_t def) const;
 };
 

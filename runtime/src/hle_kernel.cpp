@@ -146,6 +146,8 @@ HleItem* Portfolio::item(int32_t num) {
 
 HleItem* Portfolio::find_item(uint32_t ctype, const std::string& name) {
     const uint8_t subsys = uint8_t(ctype >> 8), type = uint8_t(ctype);
+    // intlOpenLocale(NULL) and similar: there is one locale, whatever name is asked for.
+    if (subsys == 9 && type == 1 && locale_item_) return item(locale_item_);
     const std::string want = lower(name);
     for (auto& it : items_)
         if (it.alive && it.num && it.subsys == subsys && it.type == type && lower(it.name) == want) return &it;
@@ -198,6 +200,30 @@ static uint32_t take_top(std::map<uint32_t, uint32_t>& fl, uint32_t size) {
     return 0;
 }
 
+// A fit whose start is a multiple of `align` (a power of two): the lowest
+// one, or the highest with `from_top`. What is left either side stays free.
+static uint32_t take_aligned(std::map<uint32_t, uint32_t>& fl, uint32_t size, uint32_t align, bool from_top) {
+    auto fits = [&](uint32_t base, uint32_t len, uint32_t& a) {
+        if (len < size) return false;
+        if (from_top) a = (base + len - size) & ~(align - 1);
+        else a = (base + align - 1) & ~(align - 1);
+        return a >= base && uint64_t(a) + size <= uint64_t(base) + len;
+    };
+    auto use = [&](uint32_t base, uint32_t len, uint32_t a) {
+        fl.erase(base);
+        if (a > base) fl[base] = a - base;
+        if (a + size < base + len) fl[a + size] = base + len - (a + size);
+        return a;
+    };
+    uint32_t a = 0;
+    if (from_top) {
+        for (auto it = fl.rbegin(); it != fl.rend(); ++it) if (fits(it->first, it->second, a)) return use(it->first, it->second, a);
+    } else {
+        for (auto it = fl.begin(); it != fl.end(); ++it) if (fits(it->first, it->second, a)) return use(it->first, it->second, a);
+    }
+    return 0;
+}
+
 static void give(std::map<uint32_t, uint32_t>& fl, uint32_t a, uint32_t size) {
     auto it = fl.emplace(a, size).first;
     auto next = std::next(it);
@@ -208,21 +234,56 @@ static void give(std::map<uint32_t, uint32_t>& fl, uint32_t a, uint32_t size) {
     }
 }
 
+// Rebuilds each bank's free-page bitmap from the allocator's free ranges
+// (a page counts as free when it lies wholly inside one). Doom sizes its
+// memory pool from availMem(); with no free pages reported it quit with
+// "Can't start memory manager".
+void Portfolio::update_free_page_bits() {
+    auto fill = [&](uint32_t mh, const std::map<uint32_t, uint32_t>& fl) {
+        if (!mh) return;
+        const uint32_t bits = r32(mh + memhdr::FreePageBits);
+        const uint32_t words = r8(mh + memhdr::FreePageBitsSize);
+        const uint32_t base = r32(mh + memhdr::MemBase);
+        if (!bits || !words) return;
+        std::vector<uint32_t> w(words, 0);
+        for (const auto& [a, sz] : fl) {
+            const uint32_t first = (a - base + 2047) / 2048, end = (a + sz - base) / 2048;
+            for (uint32_t p = first; p < end && p < words * 32; ++p) w[p / 32] |= 1u << (p % 32);
+        }
+        for (uint32_t i = 0; i < words; ++i) w32(bits + i * 4, w[i]);
+    };
+    fill(memhdr_dram_, free_dram_);
+    fill(memhdr_vram_, free_vram_);
+}
+
 uint32_t Portfolio::alloc(uint32_t size, uint32_t flags) {
     if (size == 0 || size > kRamEnd) return 0;
-    const uint32_t sz = (size + 15) & ~15u;
+    uint32_t sz = (size + 15) & ~15u;
     uint32_t a = 0;
+    // MEMTYPE_STARTPAGE / MEMTYPE_SYSTEMPAGESIZE: the block starts on a 2 KB
+    // page and (here) fills whole pages; MEMTYPE_INPAGE: it crosses no page.
+    // Screen buffers are asked for this way, and games then work on whole
+    // pages: Brain Dead 13 clears its background buffer page by page from the
+    // page boundary, which wiped a thread stack that shared that page.
+    constexpr uint32_t kPage = 2048, kStartPage = 0x02000000u, kSysPage = 0x04000000u, kInPage = 0x01000000u;
+    uint32_t align = 16;
+    if (flags & (kStartPage | kSysPage)) { align = kPage; sz = (sz + kPage - 1) & ~(kPage - 1); }
+    else if ((flags & kInPage) && sz <= kPage) { align = 16; while (align < sz) align <<= 1; }
     // Small blocks come from the top of memory, large ones from the bottom, so
     // leftover small allocations (a thread stack a game never frees, message
     // buffers) can't split the space big buffers need. Slam 'n Jam needs one
     // 890 KB block each attract-mode cycle and leaks a 4 KB stack per cycle.
     static const bool split = std::getenv("TDORT_ALLOC_FLAT") == nullptr;
     const bool small = split && sz <= 8192;
-    auto pick = ((flags & kMemFromTop) || small) ? take_top : take;
+    const bool top = (flags & kMemFromTop) || small;
+    auto pick = [&](std::map<uint32_t, uint32_t>& fl, uint32_t n) {
+        return align > 16 ? take_aligned(fl, n, align, top) : top ? take_top(fl, n) : take(fl, n);
+    };
     if (flags & kMemVram) a = pick(free_vram_, sz);
     else if (!(a = pick(free_dram_, sz))) a = pick(free_vram_, sz);   // 3DO memory is unified enough
     if (!a) { rt.log("AllocMem(%u, %08X) failed: out of memory", size, flags); return 0; }
     allocs_[a] = sz;
+    update_free_page_bits();
     if (!tasks_.empty()) alloc_owner_[a] = owning_task(cur());
     static const bool mem_trace = std::getenv("TDORT_MEM_TRACE") != nullptr;
     if (mem_trace && sz >= 1024)
@@ -240,6 +301,7 @@ void Portfolio::free_mem(uint32_t a) {
     give(a >= kVramBase ? free_vram_ : free_dram_, it->first, it->second);
     allocs_.erase(it);
     alloc_owner_.erase(a);
+    update_free_page_bits();
 }
 
 int32_t Portfolio::owning_task(const HleTask& t) {
@@ -347,7 +409,7 @@ uint32_t Portfolio::make_folio(const std::string& name, uint8_t node_subsys, uin
         auto f = impl.find(idx);
         std::string slot = name + "[" + std::to_string(idx) + "]";
         if (f != impl.end()) set_vector(base, idx, slot, f->second);
-        else set_vector(base, idx, slot, [this, slot](Cpu*) { stub(slot); });
+        else w32(base + uint32_t(idx * 4), rt.register_trap(slot, [this, slot](Cpu*) { stub(slot); }, true));
     }
     if (item_out) *item_out = it.num;
     rt.log("HLE folio %-10s base=%08X item=%d", name.c_str(), base, it.num);
@@ -376,6 +438,20 @@ void Portfolio::install_kernel_vectors() {
     v[kvAllocMem]   = [this](Cpu*) { c.r[0] = alloc(arg(1), arg(2)); };
     v[kvFreeMem]    = [this](Cpu*) { free_mem(arg(1)); };
     v[kvScavengeMem] = [this](Cpu*) { c.r[0] = 0; };
+    v[kvFindImage]   = [this](Cpu*) { c.r[0] = 0; };          // FindImage: no ROM images here
+    v[-17] = [](Cpu*) {};   // UniversalInsertNode: replaced by ARM code after the folio is made (below)
+    // Memory lists: a program's private pools. Their memory comes from the
+    // task's normal allocator here, so a MemList is just a small marker block.
+    v[kvAllocMemML]   = [this](Cpu*) { c.r[0] = alloc(arg(1), arg(2)); };          // AllocMemFromMemList(ml, size, flags)
+    v[kvFreeMemML]    = [this](Cpu*) { free_mem(arg(1)); };                       // FreeMemToMemList(ml, p, size)
+    v[kvAllocMemList] = [this](Cpu*) { c.r[0] = alloc(64, kMemFill); };           // AllocMemList(p, name)
+    v[kvFreeMemList]  = [this](Cpu*) { if (arg(0)) free_mem(arg(0)); };            // FreeMemList(ml)
+    // CheckIO(ior): 1 once the request is done, 0 while in progress, <0 bad item.
+    v[kvCheckIO] = [this](Cpu*) {
+        HleItem* it = item(int32_t(arg(0)));
+        if (!it || it->kind != ItemKind::IOReq) { c.r[0] = uint32_t(kErrBadItem); return; }
+        c.r[0] = (r32(it->addr + ioreq::Flags) & kIoDone) ? 1 : 0;
+    };
     // FindMH(void *p): the header of the memory bank containing p
     v[kvFindMH] = [this](Cpu*) {
         uint32_t p = arg(0);
@@ -512,6 +588,26 @@ void Portfolio::install_kernel_vectors() {
 
     int32_t kitem = 0;
     kbase_ = make_folio("kernel", kSubsysKernel, kKernelVectorCount, v, &kitem);
+    // UniversalInsertNode(list, node, func): node goes before the first entry m
+    // with func(node, m) true, else at the end. It calls back into the game, so
+    // it is ARM code the runtime runs like the game's own:
+    //   stmfd sp!,{r4-r7,lr}; r4=list r5=node r6=func; r7=list->head
+    //   loop: if (!r7->next) goto insert (r7 is the list's anchor: append)
+    //         if (func(node, r7)) goto insert; r7 = r7->next; goto loop
+    //   insert: link node in before r7; ldmfd sp!,{r4-r7,pc}
+    {
+        static const uint32_t code[] = {
+            0xE92D40F0, 0xE1A04000, 0xE1A05001, 0xE1A06002, 0xE5947014,   // 0-4
+            0xE5970000, 0xE3500000, 0x0A00000D,                           // 5 loop: ldr r0,[r7]; cmp; beq tail
+            0xE1A00005, 0xE1A01007, 0xE1A0E00F, 0xE1A0F006,               // 8: r0=node r1=m; call func
+            0xE3500000, 0x1A000001, 0xE5977000, 0xEAFFFFF4,               // 12: bne insert; m=m->next; b loop
+            0xE5970004, 0xE5857000, 0xE5850004, 0xE5805000, 0xE5875004,   // 16 insert
+            0xE8BD80F0,                                                    // 21 return
+            0xEAFFFFF8,                                                    // 22 tail: b insert
+        };
+        const uint32_t at = rt.hle_code(code, sizeof code / 4);
+        w32(kbase_ + uint32_t(-17 * 4), at);
+    }
 
     // Current task and the system lists games may walk.
     HleItem& t = new_item(ItemKind::Task, kSubsysKernel, kNodeTask, task::Size, "LaunchMe", false);
@@ -540,6 +636,10 @@ void Portfolio::install_kernel_vectors() {
     list_init(mem_lists, 0);
     w32(cur().addr + task::FreeMemoryLists, mem_lists);
     w32(kbase_ + kbase::BootVolumeName, guest_string("cd-rom"));
+    // Hardware flags of a retail console: big-endian, 32-bit mode, ARM60,
+    // production ("Red") silicon, control port, no debugger. Brain Dead 13
+    // refuses to run unless the Red bit is set.
+    w32(kbase_ + kbase::CPUFlags, 0x1 | 0x2 | 0x4 | 0x20 | 0x1000 | 0x8000);
 
     // Memory bank headers: games use FindMH()/GetMemType() and the list to
     // learn where DRAM and VRAM are and what each can be used for.
@@ -560,11 +660,18 @@ void Portfolio::install_kernel_vectors() {
         w32(h + memhdr::MemBase, base);
         w32(h + memhdr::MemTop, base + size - 1);
         w8(h + memhdr::PageShift, 11);
+        w8(h + memhdr::VramPageShift, 11);
+        // One bit per 2 KB page, set while the page is free: the C library's
+        // availMem() adds these up to report free memory.
+        const uint32_t words = (size / 2048 + 31) / 32;
+        w32(h + memhdr::FreePageBits, rt.hle_alloc(words * 4));
+        w8(h + memhdr::FreePageBitsSize, uint8_t(words));
         list_add_tail(mh_list, h);
         return h;
     };
     memhdr_dram_ = make_mh(kDramBase, kDramSize, kMemTypesDram, "DRAM");
     memhdr_vram_ = make_mh(kVramBase, kVramSize, kMemTypesVram, "VRAM");
+    update_free_page_bits();
     (void)kitem;
 }
 
@@ -576,6 +683,37 @@ void Portfolio::install_kernel_swis() {
     auto K = [this](uint32_t n, const char* name, HleFn fn) { rt.register_swi(kKernelSwi + n, name, std::move(fn)); };
 
     K(kCreateSizedItem, "CreateSizedItem", [this](Cpu*) { c.r[0] = uint32_t(create_item(arg(0), arg(1), arg(2))); });
+    // Tasks only switch at OS calls here, so Forbid/Permit (no task switching
+    // until Permit) need no work.
+    K(11, "Forbid", [this](Cpu*) { c.r[0] = 0; });
+    K(12, "Permit", [this](Cpu*) { c.r[0] = 0; });
+    K(26, "RSACheck", [this](Cpu*) { c.r[0] = 1; });                       // signature check: always valid
+    K(27, "wcopy", [this](Cpu*) {                                          // wcopy(src, dst, bytes)
+        const uint32_t src = arg(0), dst = arg(1);
+        const uint32_t n = uint32_t(std::max<int32_t>(0, int32_t(arg(2)))) & ~3u;
+        if (guest_range_ok(src, n) && guest_range_ok(dst, n)) std::memmove(&rt.mem.ram[dst], &rt.mem.ram[src], n);
+        c.r[0] = 0;
+    });
+    K(30, "MayGetChar", [this](Cpu*) { c.r[0] = uint32_t(-1); });          // no debug terminal: no character
+    K(35, "DiscOsVersion", [this](Cpu*) {                                  // DiscOsVersion(set): previous value
+        const uint32_t prev = disc_os_version_;
+        if (arg(0)) disc_os_version_ = arg(0);
+        c.r[0] = prev;
+    });
+    K(42, "Print3DOHeader", [this](Cpu*) { c.r[0] = 0; });
+    // SetFunction(folio, vector, type, func) -> the previous function. Only
+    // user-mode vectors (negative numbers) can be replaced.
+    K(23, "SetFunction", [this](Cpu*) {
+        HleItem* f = item(int32_t(arg(0)));
+        const int32_t vnum = int32_t(arg(1));
+        if (!f || f->kind != ItemKind::Folio || vnum >= 0 || vnum < -128) { c.r[0] = uint32_t(kErrNotSupported); return; }
+        const uint32_t slot = f->addr + uint32_t(vnum * 4);
+        const uint32_t old = r32(slot);
+        w32(slot, arg(3));
+        c.r[0] = old;
+    });
+    K(29, "callbacksuper", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });   // supervisor code: not available
+    K(34, "CompleteIO", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });       // for device drivers
     K(kDeleteItem, "DeleteItem", [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); });
     auto find = [this](bool open) {
         return [this, open](Cpu*) {
@@ -623,7 +761,7 @@ void Portfolio::install_kernel_swis() {
     // LockSemaphore / UnlockSemaphore (generic LockItem/UnlockItem on other items)
     K(kLockItem, "LockSemaphore", [this](Cpu*) {
         HleItem* s = item(int32_t(arg(0)));
-        if (!s || s->kind != ItemKind::Semaphore) { c.r[0] = 1; return; }
+        if (!s || s->kind != ItemKind::Semaphore) { c.r[0] = uint32_t(kErrBadItem); return; }
         if (s->sem_owner == 0 || s->sem_owner == cur().item) {
             s->sem_owner = cur().item; ++s->sem_count; wait_done(); c.r[0] = 1; return;
         }
@@ -645,7 +783,14 @@ void Portfolio::install_kernel_swis() {
         w8(it->addr + node::Priority, uint8_t(arg(1)));
         c.r[0] = old;
     });
-    K(kSetItemOwner, "SetItemOwner", [this](Cpu*) { c.r[0] = 0; });
+    // SetItemOwner(item, task): the item now belongs to that task, so it is
+    // not deleted when the old owner ends (and a port signals its new owner).
+    K(kSetItemOwner, "SetItemOwner", [this](Cpu*) {
+        HleItem* it = item(int32_t(arg(0)));
+        if (!it || !task_by_item(int32_t(arg(1)))) { c.r[0] = uint32_t(kErrBadItem); return; }
+        it->owner_task = int32_t(arg(1));
+        c.r[0] = 0;
+    });
 
     // --- signals. There is one task, so a wait can only be satisfied by
     // something the HLE itself raises (IO completion, timers) - or by time
@@ -788,11 +933,46 @@ void Portfolio::install_kernel_swis() {
         const size_t me = cur_;
         to_caller(me, uint32_t(do_io(int32_t(arg(0)), arg(1), nullptr)));
     });
+    // WaitIO(ior): as the kernel does, waits until the request is done, then
+    // takes its completion message off the reply port, or uses up the
+    // SIGF_IODONE signal. (It used to return at once, even mid-request.)
     K(kWaitIO, "WaitIO", [this](Cpu*) {
         HleItem* ior = item(int32_t(arg(0)));
-        c.r[0] = ior ? r32(ior->addr + ioreq::Error) : uint32_t(kErrBadItem);
+        if (!ior || ior->kind != ItemKind::IOReq) { c.r[0] = uint32_t(kErrBadItem); return; }
+        if (old_io()) { c.r[0] = r32(ior->addr + ioreq::Error); return; }
+        const uint32_t flags = r32(ior->addr + ioreq::Flags);
+        if (!(flags & kIoQuick) && !(flags & kIoDone)) { block_retry(); return; }
+        if (!(flags & kIoQuick)) {
+            if (HleItem* port = item(ior->reply_port)) {
+                auto& q = port->queue;
+                auto it = std::find(q.begin(), q.end(), ior->msg_item);
+                if (it != q.end()) { q.erase(it); if (HleItem* m = item(ior->msg_item)) m->in_port = 0; }
+            } else {
+                cur().pending &= ~kSigIODone;
+                w32(cur().addr + task::SigBits, cur().pending);
+            }
+        }
+        wait_done();
+        c.r[0] = r32(ior->addr + ioreq::Error);
     });
-    K(kAbortIO, "AbortIO", [this](Cpu*) { c.r[0] = 0; });
+    // AbortIO(ior): a request still pending (a timer, a SPORT transfer) ends
+    // now with ER_Aborted; a finished one is left alone.
+    K(kAbortIO, "AbortIO", [this](Cpu*) {
+        HleItem* ior = item(int32_t(arg(0)));
+        if (!ior || ior->kind != ItemKind::IOReq) { c.r[0] = uint32_t(kErrBadItem); return; }
+        if (std::getenv("TDORT_DEBUG_IO")) { std::string l; for (auto& v : vbl_io_) l += " " + std::to_string(v.ior) + "@" + std::to_string(v.due_frame); rt.log("AbortIO %d at frame %u: pending%s", ior->num, frame_no_, l.c_str()); }
+        for (size_t i = 0; i < vbl_io_.size(); ++i) {
+            if (vbl_io_[i].ior != ior->num) continue;
+            const int32_t task = vbl_io_[i].task;
+            vbl_io_.erase(vbl_io_.begin() + long(i));
+            const bool q = io_quick_;
+            io_quick_ = false;
+            complete_io(*ior, int32_t(0x8101010A) /* ER_Aborted */, 0, task);
+            io_quick_ = q;
+            break;
+        }
+        c.r[0] = 0;
+    });
 
     // --- misc
     K(kSampleSystemTime, "SampleSystemTime", [this](Cpu*) { c.r[0] = uint32_t(usec()); });
@@ -855,6 +1035,7 @@ void Portfolio::wait_port(int32_t port_num, int32_t want) {
 
 void Portfolio::send_message(HleItem& port, HleItem& msg) {
     if (port.num == broker_port_ && broker_buf_.count(msg.num)) {   // game replied to an event
+        last_input_frame_ = frame_no_;
         msg.in_port = 0;
         broker_free_.push_back(msg.num);
         return;
@@ -993,6 +1174,11 @@ int32_t Portfolio::do_io(int32_t ior_num, uint32_t info, bool* quick) {
     // Copy the caller's IOInfo into the request, as the kernel does.
     for (uint32_t k = 0; k < ioinfo::Size; k += 4) w32(ior->addr + ioreq::Info + k, r32(info + k));
     w32(ior->addr + ioreq::Flags, 0);
+    // A new request starts with no error and nothing transferred, as the
+    // kernel does. A request still pending reports 0 from SendIO; a stale
+    // ER_Aborted left by AbortIO made Creature Shock skip a reply and hang.
+    w32(ior->addr + ioreq::Error, 0);
+    w32(ior->addr + ioreq::Actual, 0);
     // DoIO (quick == nullptr) always asks for synchronous completion.
     io_quick_ = !quick || (r8(info + ioinfo::Flags) & kIoQuick) != 0;
     if (quick) *quick = io_quick_;
@@ -1047,6 +1233,7 @@ void Portfolio::sport_io(HleItem& ior, uint32_t info) {
         return;
     }
     const uint32_t n = cmd == 5 ? std::min(slen, dlen) : dlen;
+    if (rt.cfg.trace) rt.log("SPORT cmd %u: %08X/%u -> %08X-%08X", cmd, src, slen, dst, dst + n);
     for (uint32_t k = 0; k + 4 <= n; k += 4) {
         const uint32_t s = load_be32(&rt.mem.ram[src + (cmd == 4 ? k % slen : k)]);
         uint8_t* d = &rt.mem.ram[dst + k];
@@ -1059,10 +1246,23 @@ void Portfolio::sport_io(HleItem& ior, uint32_t info) {
     // thread gets to run. Completing it at once starved that thread.
     if (!io_quick_) {
         w32(ior.addr + ioreq::Flags, r32(ior.addr + ioreq::Flags) & ~kIoDone);
-        vbl_io_.push_back({ior.num, cur().item, 0, n});
+        vbl_io_.push_back({ior.num, cur().item, 0, n, frame_no_ + 1});
         return;
     }
     complete_io(ior, 0, n);
+}
+
+// An asynchronous (SendIO) request that completes `frames` frames from now,
+// as a real timer request does: the caller keeps running, and the IOReq is
+// marked done (with its signal or reply) when the time comes.
+// TDORT_OLD_IO=1: timer SendIO sleeps the caller and WaitIO returns at once,
+// as before November 2026 (a fallback if a game does worse with the change).
+bool Portfolio::old_io() { static const bool v = std::getenv("TDORT_OLD_IO") != nullptr; return v; }
+
+void Portfolio::defer_io(HleItem& ior, uint32_t frames) {
+    w32(ior.addr + ioreq::Flags, r32(ior.addr + ioreq::Flags) & ~kIoDone);
+    vbl_io_.push_back({ior.num, cur().item, 0, 0, frame_no_ + frames});
+    if (rt.cfg.trace) rt.log("timer IO %d: completes in %u frames (at frame %u)", ior.num, frames, frame_no_ + frames);
 }
 
 void Portfolio::timer_io(HleItem& ior, uint32_t info) {
@@ -1074,6 +1274,7 @@ void Portfolio::timer_io(HleItem& ior, uint32_t info) {
         // WaitVBL and friends: this task sleeps until the next frame(s).
         uint32_t fields = r32(info + ioinfo::Offset);
         uint32_t frames = cmd == kTimerCmdDelay ? std::max<uint32_t>(1, (fields + 1) / 2) : 1;
+        if (!io_quick_ && multitasking() && !old_io()) { defer_io(ior, frames); return; }   // SendIO: the caller carries on
         complete_io(ior, 0, 0);
         if (multitasking()) sleep_until(frame_no_ + frames);
         else rt.request_vblank_wait();
@@ -1082,12 +1283,37 @@ void Portfolio::timer_io(HleItem& ior, uint32_t info) {
     if (cmd == kCmdRead) {                        // current time as {seconds, microseconds}
         uint32_t buf = r32(info + ioinfo::RecvBuf), len = r32(info + ioinfo::RecvLen);
         uint64_t us = usec();
-        if (unit == kTimerUnitVblank) { if (len >= 4) w32(buf, uint32_t(us / 16667)); if (len >= 8) w32(buf + 4, 0); }
+        if (unit == kTimerUnitVblank) {
+            // VBlankTimeVal: a 64-bit count, high word first. Jurassic Park's
+            // terminal busy-waits on the low word (it was always 0 here).
+            const uint64_t vbl = us / 16667;
+            if (len >= 8) { w32(buf, uint32_t(vbl >> 32)); w32(buf + 4, uint32_t(vbl)); }
+            else if (len >= 4) w32(buf, uint32_t(vbl));
+        }
         else { if (len >= 4) w32(buf, uint32_t(us / 1000000)); if (len >= 8) w32(buf + 4, uint32_t(us % 1000000)); }
         complete_io(ior, 0, std::min<uint32_t>(len, 8));
         return;
     }
-    if (cmd == kTimerCmdDelay || cmd == kTimerCmdDelayUntil) { complete_io(ior, 0, 0); return; }
+    if (cmd == kTimerCmdDelay || cmd == kTimerCmdDelayUntil) {
+        // Microsecond unit: the task sleeps that long ({seconds, microseconds} in
+        // the send buffer: a duration for DELAY, a clock time for DELAYUNTIL).
+        // Tasks are scheduled by frame, so the delay is rounded to whole
+        // frames; under half a frame it only yields. Completing at once made
+        // Doom's 60 Hz timer thread race: its game loop waits on that tick.
+        const uint32_t buf = r32(info + ioinfo::SendBuf), len = r32(info + ioinfo::SendLen);
+        uint64_t want = 0;
+        if (buf && len >= 8) want = uint64_t(r32(buf)) * 1000000u + r32(buf + 4);
+        else if (buf && len >= 4) want = uint64_t(r32(buf)) * 1000000u;
+        uint64_t us = want;
+        if (cmd == kTimerCmdDelayUntil) { const uint64_t now = usec(); us = want > now ? want - now : 0; }
+        const uint32_t frames = uint32_t(std::min<uint64_t>((us + 8333) / 16667, 60u * 3600u));
+        if (!io_quick_ && multitasking() && !old_io()) { defer_io(ior, std::max<uint32_t>(frames, 1)); return; }   // SendIO: the caller carries on
+        complete_io(ior, 0, 0);
+        if (frames == 0) { if (multitasking()) switch_to_next(false); return; }
+        if (multitasking()) sleep_until(frame_no_ + frames);
+        else rt.request_vblank_wait();
+        return;
+    }
     stub("timer cmd " + std::to_string(cmd));
     complete_io(ior, 0, 0);
 }

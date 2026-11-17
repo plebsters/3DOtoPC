@@ -123,7 +123,7 @@ constexpr uint32_t ThreadTask = 36,   // t_ThreadTask: the task that owns a thre
                    FreeMemoryLists = 168, Size = 220;
 }
 namespace kbase {
-constexpr uint32_t MemFreeLists = 116, MemHdrList = 120, FolioList = 124, Devices = 132, CurrentTask = 152,
+constexpr uint32_t MemFreeLists = 116, MemHdrList = 120, FolioList = 124, Devices = 132, CurrentTask = 152, CPUFlags = 180,
                    BootVolumeName = 272, Tasks = 276, Size = 280;
 }
 namespace graffolio {   // public part of the Graphics folio structure
@@ -132,7 +132,8 @@ constexpr uint32_t Flags = 112, VBLNumber = 116, ZeroPage = 120, VIRSPage = 124,
 }
 namespace memhdr {   // one per memory bank (DRAM, VRAM)
 constexpr uint32_t Types = 20, PageSize = 24, PageMask = 28, VramPageSize = 32, VramPageMask = 36,
-                   FreePageBits = 40, MemBase = 44, MemTop = 48, PageShift = 53, Size = 56;
+                   FreePageBits = 40, MemBase = 44, MemTop = 48, FreePageBitsSize = 52, PageShift = 53,
+                   VramPageShift = 54, Size = 56;
 }
 // Memory-type flags each bank satisfies (as games probe for them)
 constexpr uint32_t kMemTypesDram = 0x3E0000;   // DRAM | DMA | CEL | AUDIO | DSP
