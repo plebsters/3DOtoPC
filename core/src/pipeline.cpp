@@ -11,6 +11,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <iterator>
 
 namespace fs = std::filesystem;
@@ -179,7 +180,50 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
     cx.progress(TDO_STAGE_EMIT, 0);
     tdo::EmitOptions eopt;
     eopt.game_name = (opt.game_name && *opt.game_name) ? opt.game_name : (volume_label.empty() ? "3DO Game" : volume_label);
-    auto files = tdo::emit_cpp(img, a, eopt, (out / "src").u8string());
+    // 5a. Other programs on the disc(s): anything else in AIF format (movie
+    // players, front ends, game parts loaded with LoadProgram / LoadCode).
+    // Each is translated too and runs natively wherever the game loads it.
+    std::vector<tdo::ModuleSource> modules;
+    {
+        std::set<std::string> seen{tdort::fnv1a64_hex(exe_bytes)};
+        std::error_code ec;
+        for (auto& top : fs::directory_iterator(out, ec)) {
+            const std::string tn = top.path().filename().u8string();
+            if (!top.is_directory(ec) || (tn != "data" && tn.rfind("data_disc", 0) != 0)) continue;
+            for (auto it = fs::recursive_directory_iterator(top.path(), ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                if (ec) break;
+                // the disc's System folder holds the OS's own programs, which the runtime replaces
+                if (it.depth() == 0 && it->is_directory(ec) && ieq(it->path().filename().u8string(), "System")) {
+                    it.disable_recursion_pending();
+                    continue;
+                }
+                if (!it->is_regular_file(ec)) continue;
+                const uintmax_t size = it->file_size(ec);
+                if (size < 256 || size > 4u * 1024 * 1024) continue;
+                std::ifstream f(it->path(), std::ios::binary);
+                uint8_t head[20] = {};
+                if (!f.read(reinterpret_cast<char*>(head), sizeof head)) continue;
+                // AIF: header word 4 is the exit SWI, word 3 a BL to the entry
+                const uint32_t w3 = tdort::aif_word(head + 12, true), w4 = tdort::aif_word(head + 16, true);
+                if ((w3 & 0xFF000000u) != 0xEB000000u || (w4 & 0xFFFF0000u) != 0xEF000000u) continue;
+                f.seekg(0);
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                const std::string h = tdort::fnv1a64_hex(bytes);
+                if (!seen.insert(h).second) continue;
+                tdo::ModuleSource m;
+                std::string e;
+                if (!tdort::parse_aif(bytes, m.image, e) || m.image.compressed) continue;
+                m.name = fs::relative(it->path(), top.path(), ec).generic_u8string();
+                m.file_hash = h;
+                tdo::AnalysisOptions mo;
+                mo.scan_prologues = opt.scan_prologues != 0;
+                m.analysis = tdo::analyze(m.image, mo);
+                cx.info(fmt("Also translating %s (%zu blocks)", m.name.c_str(), m.analysis.blocks.size()));
+                modules.push_back(std::move(m));
+            }
+        }
+    }
+    auto files = tdo::emit_cpp(img, a, eopt, (out / "src").u8string(), modules);
     cx.info(fmt("Generated %zu source files in src/", files.size()));
 
     fs::path runtime = (opt.runtime_dir && *opt.runtime_dir) ? fs::u8path(opt.runtime_dir)

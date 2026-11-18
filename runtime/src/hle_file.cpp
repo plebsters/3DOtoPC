@@ -1,3 +1,4 @@
+#include <deque>
 #include <iterator>
 #include <sstream>
 // hle_file.cpp - File folio replacement. Serves the extracted disc (data/)
@@ -9,6 +10,7 @@
 // case-insensitive, as on the 3DO.
 #include "hle_os.h"
 #include "tdort/aif.h"
+#include "tdort/host_name.h"
 #include <fstream>
 #include <algorithm>
 #include <cctype>
@@ -46,35 +48,58 @@ static bool ieq(const std::string& a, const std::string& b) {
 }
 
 bool Portfolio::resolve(const std::string& guest, std::string& host, std::string& normalized, bool& is_dir) const {
-    std::vector<std::string> parts;
-    std::string p = guest;
-    // "$name/rest": an alias. CreateAlias defines them; "$boot" (the volume the
-    // game booted from) and "$progdir" (the running program's directory, the
-    // disc's root for a game) are always there. Aliases may name others.
-    for (int depth = 0; depth < 8 && !p.empty() && p[0] == '$'; ++depth) {
-        size_t slash = p.find('/');
-        std::string name = p.substr(1, slash == std::string::npos ? std::string::npos : slash - 1);
-        std::string rest = slash == std::string::npos ? "" : p.substr(slash);
+    // Path parsing as the file folio does it: "$name" may begin any component
+    // and is replaced by the alias's value; a value starting with "/" (as
+    // $boot's, "/cd-rom") goes back to the root, as does an empty component
+    // ("//"). After the root comes the filesystem name (cd-rom, a volume
+    // label), which is skipped. So "$boot/HEGAMES/$boot/HEGAMES/puttmoon.he0"
+    // is /cd-rom/HEGAMES/puttmoon.he0 (Putt-Putt Goes to the Moon asks for it).
+    // CreateAlias defines aliases; "$boot" (the volume the game booted from)
+    // and "$progdir" (the running program's directory, the disc's root for a
+    // game) are always there.
+    auto alias_value = [&](const std::string& name, std::string& value) {
         std::string key = name;
         for (auto& ch : key) ch = char(std::tolower((unsigned char)ch));
-        if (auto it = aliases_.find(key); it != aliases_.end()) p = it->second + rest;
-        else if (key == "boot" || key == "progdir") p = "/cd-rom" + rest;
-        else break;
-    }
-    if (!p.empty() && p[0] == '/') {
-        auto comps = split(p);
-        if (!comps.empty()) comps.erase(comps.begin());       // filesystem name (cd-rom, volume label...)
-        parts = comps;
-    } else {
-        parts = split(cwd_ref());
-        for (auto& s : split(p)) parts.push_back(s);
-    }
-    // normalise . and .. ("^" is also accepted as parent)
+        if (auto it = aliases_.find(key); it != aliases_.end()) { value = it->second; return true; }
+        if (key == "boot" || key == "progdir") { value = "/cd-rom"; return true; }
+        return false;
+    };
     std::vector<std::string> clean;
-    for (auto& s : parts) {
-        if (s == ".") continue;
-        if (s == ".." || s == "^") { if (!clean.empty()) clean.pop_back(); continue; }
-        clean.push_back(s);
+    std::deque<std::string> todo;
+    bool skip_fs_name = false;
+    auto queue = [&](const std::string& text, bool front) {
+        // components of text, with "" for the root ("/x" -> "", "x")
+        std::vector<std::string> comps;
+        size_t i = 0;
+        if (!text.empty() && text[0] == '/') { comps.push_back(""); i = 1; }
+        while (i <= text.size()) {
+            size_t j = text.find('/', i);
+            if (j == std::string::npos) j = text.size();
+            std::string c = text.substr(i, j - i);
+            if (!c.empty()) comps.push_back(c);
+            else if (j < text.size() && i > 0) comps.push_back("");   // "//": back to the root
+            i = j + 1;
+        }
+        if (front) todo.insert(todo.begin(), comps.begin(), comps.end());
+        else todo.insert(todo.end(), comps.begin(), comps.end());
+    };
+    if (guest.empty() || (guest[0] != '/' && guest[0] != '$'))
+        for (auto& c : split(cwd_ref())) clean.push_back(c);
+    queue(guest, false);
+    for (int expansions = 0; !todo.empty();) {
+        std::string c = todo.front();
+        todo.pop_front();
+        if (c.empty()) { clean.clear(); skip_fs_name = true; continue; }
+        if (c[0] == '$') {
+            std::string value;
+            if (++expansions > 32 || !alias_value(c.substr(1), value)) return false;
+            queue(value, true);
+            continue;
+        }
+        if (skip_fs_name) { skip_fs_name = false; continue; }
+        if (c == ".") continue;
+        if (c == ".." || c == "^") { if (!clean.empty()) clean.pop_back(); continue; }
+        clean.push_back(c);
     }
     // case-insensitive walk of the host tree, on the disc in the drive
     std::error_code ec;
@@ -83,13 +108,16 @@ bool Portfolio::resolve(const std::string& guest, std::string& host, std::string
         norm.clear();
         for (auto& comp : clean) {
             fs::path next;
-            if (fs::exists(cur / fs::u8path(comp), ec)) next = cur / fs::u8path(comp);
+            const std::string stored = encode_host_name(comp);
+            if (fs::exists(cur / fs::u8path(stored), ec)) next = cur / fs::u8path(stored);
             else {
-                for (auto& de : fs::directory_iterator(cur, ec))
-                    if (ieq(de.path().filename().u8string(), comp)) { next = de.path(); break; }
+                for (auto& de : fs::directory_iterator(cur, ec)) {
+                    const std::string n = de.path().filename().u8string();
+                    if (ieq(decode_host_name(n), comp) || ieq(n, comp)) { next = de.path(); break; }
+                }
             }
             if (next.empty()) return false;
-            norm += "/" + next.filename().u8string();
+            norm += "/" + decode_host_name(next.filename().u8string());
             cur = next;
         }
         if (norm.empty()) norm = "/";
@@ -158,7 +186,7 @@ void Portfolio::fill_dir_entry(const std::string& host, uint32_t index, uint8_t*
     put(direntry::BlockCount, uint32_t((bytes + kBlock - 1) / kBlock));
     put(direntry::Burst, 1);
     put(direntry::AvatarCount, 1);
-    const std::string nm = p.filename().u8string().substr(0, direntry::FileNameLen - 1);
+    const std::string nm = decode_host_name(p.filename().u8string()).substr(0, direntry::FileNameLen - 1);
     std::memcpy(e + direntry::FileName, nm.data(), nm.size());
 }
 
@@ -168,7 +196,8 @@ bool Portfolio::nvram_path(const std::string& guest, std::string& host) const {
     std::string p = guest;
     if (p.size() < 7 || !ieq(p.substr(0, 7), "/nvram/")) return false;
     std::string name = p.substr(7);
-    for (auto& ch : name) if (ch == '/' || ch == '\\' || ch == ':') ch = '_';
+    for (auto& ch : name) if (ch == '/') ch = '_';
+    name = encode_host_name(name);
     std::error_code ec;
     fs::path dir = fs::u8path(rt.cfg.data_dir).parent_path() / "nvram";
     if (fs::u8path(rt.cfg.data_dir).parent_path().empty()) dir = fs::u8path("nvram");
@@ -203,7 +232,7 @@ int32_t Portfolio::open_file(const std::string& path, const std::string& base_di
     if (nvram_path(path, nv)) {
         std::error_code ec;
         if (!fs::exists(fs::u8path(nv), ec)) { rt.log("OpenDiskFile(\"%s\"): not found (NVRAM)", path.c_str()); return kErrNotFound; }
-        HleItem& f = new_item(ItemKind::File, kSubsysFile, kNodeFile, device::Size, fs::u8path(nv).filename().u8string());
+        HleItem& f = new_item(ItemKind::File, kSubsysFile, kNodeFile, device::Size, decode_host_name(fs::u8path(nv).filename().u8string()));
         f.guest_path = path; f.host_path = nv; f.writable = true; f.block_size = 1;
         f.file_size = fs::file_size(fs::u8path(nv), ec);
 #if defined(_WIN32)
@@ -335,8 +364,8 @@ void Portfolio::install_file() {
             if (t > 0) { c.r[0] = uint32_t(t); return; }
             rt.log("%s(\"%s\"): cannot run it here (%s)", fn, cmd.c_str(), why.c_str());
         }
-        rt.log("%s(\"%s\", %d): %s; not run (separate programs are not supported yet), "
-               "reported as finished", fn, cmd.c_str(), prio, system_tool ? "a system utility" : exists ? "found on disc" : "not on disc");
+        rt.log("%s(\"%s\", %d): %s; not run, reported as finished", fn, cmd.c_str(), prio,
+               system_tool ? "a system utility the runtime replaces" : exists ? "found on disc but could not start" : "not on disc");
         // Behave like a program that starts and exits a moment later: the
         // task item exists now (games wait for it to appear), and a few
         // frames later it is gone and the parent gets SIGF_DEADTASK (games
@@ -371,11 +400,15 @@ void Portfolio::install_file() {
         const uint32_t code = mem + 16;
         rt.mem.write_block(code, img.bytes.data(), img.load_size());
         if (out) w32(out, code);
-        rt.log("LoadCode(\"%s\") -> %08X (%u bytes)", path.c_str(), code, img.load_size());
+        const bool translated = rt.map_module(fnv1a64_hex(file), code, img.load_size(), code + (img.entry - img.image_base), path);
+        rt.log("LoadCode(\"%s\") -> %08X (%u bytes)%s", path.c_str(), code, img.load_size(), translated ? ", translated" : "");
         c.r[0] = 0;
     };
     // UnloadCode(code)
-    fv[-12] = [this](Cpu*) { if (arg(0)) free_mem(arg(0) - 16); c.r[0] = 0; };
+    fv[-12] = [this](Cpu*) {
+        if (arg(0)) { rt.unmap_modules(arg(0), arg(0) + r32(arg(0) - 16)); free_mem(arg(0) - 16); }
+        c.r[0] = 0;
+    };
     // ExecuteAsSubroutine(code, argc, argv) -> main()'s result. As the OS does:
     // the AIF header's exit instruction becomes "ldmfd sp!, {r1-r12, r14, r15}",
     // those registers are pushed, and the module runs from its header; when
@@ -390,7 +423,12 @@ void Portfolio::install_file() {
         w32(sp + 48, ret);                // r14
         w32(sp + 52, ret);                // r15: back to the caller
         c.r[13] = sp;
-        c.r[0] = argc; c.r[1] = argv;
+        // As the file folio enters a module: r0 = the code, r1/r2 = argc/argv,
+        // and r5/r6/r7 = argc, argv and KernelBase, which the module's start-up
+        // code (like a program's) takes them from. Immercenary's Cinepak
+        // module crashed without KernelBase.
+        c.r[0] = code; c.r[1] = argc; c.r[2] = argv;
+        c.r[kRegArgc] = argc; c.r[kRegArgv] = argv; c.r[kRegKernelBase] = kbase_;
         c.r[15] = code;
     };
     // ExecuteAsThread(code, argc, argv, name, priority): the module as a
@@ -645,6 +683,16 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
         }
         if (!f.fp) { complete_io(ior, kErrBadCommand, 0); return; }
         if (!guest_range_ok(rbuf, rlen)) { complete_io(ior, kErrBadPtr, 0); return; }
+        if (rbuf < 0x1000 && std::getenv("TDORT_NULLREAD")) {
+            std::string chain;
+            uint32_t fp = c.r[11];
+            for (int k = 0; k < 8 && fp > 16 && fp + 4 <= kRamEnd; ++k) {
+                char b[24]; std::snprintf(b, sizeof b, " %08X", r32(fp - 4)); chain += b;
+                fp = r32(fp - 12);
+            }
+            rt.log("read into %08X: lr %08X, frame chain%s; r4-r10 %08X %08X %08X %08X %08X %08X %08X", rbuf, c.r[14], chain.c_str(),
+                   c.r[4], c.r[5], c.r[6], c.r[7], c.r[8], c.r[9], c.r[10]);
+        }
         const uint64_t start = uint64_t(offset) * kBlock;
         if (start > f.file_size) { complete_io(ior, kErrEof, 0); return; }
         // The OS reads whole blocks straight off the disc and does not stop at the
@@ -663,6 +711,10 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
         size_t got = len ? std::fread(buf.data(), 1, len, f.fp) : 0;
         (void)got;
         rt.mem.write_block(rbuf, buf.data(), rlen);   // invalidates any recompiled code it overwrites
+        recent_reads_.push_back({f.guest_path, offset, rlen, rbuf, frame_no_});
+        if (std::getenv("TDORT_LOG_READS"))
+            rt.log("read %s block %u, %u bytes -> %08X (task %s)", f.guest_path.c_str(), offset, rlen, rbuf, cur().name.c_str());
+        if (recent_reads_.size() > 8) recent_reads_.pop_front();
         if (rt.cfg.trace || std::getenv("TDORT_TRACE_READS"))
             rt.log("read %s block %u: %u bytes (%u from the file) -> %08X-%08X", f.guest_path.c_str(), offset, rlen, len, rbuf, rbuf + rlen);
         complete_io(ior, 0, rlen);

@@ -131,6 +131,16 @@ std::string Portfolio::write_report(const std::string& ended, uint32_t screen_ch
         ev << "  port " << it.num << (it.name.empty() ? "" : " " + it.name) << " owned by " << owner << ": " << it.queue.size() << " unread\n";
     }
 
+    // ---- disc reads
+    if (!recent_reads_.empty()) {
+        ev << "\nLast disc reads:\n";
+        for (const ReadRec& r : recent_reads_) {
+            char b[200];
+            std::snprintf(b, sizeof b, "  frame %u: %s block %u, %u bytes -> %08X-%08X", r.frame, r.path.c_str(), r.block, r.bytes, r.dest, r.dest + r.bytes);
+            ev << b << "\n";
+        }
+    }
+
     // ---- memory
     auto stats = [](const std::map<uint32_t, uint32_t>& fl, uint32_t& tot, uint32_t& big) {
         tot = big = 0; for (auto& [a, n] : fl) { tot += n; big = std::max(big, n); } };

@@ -242,5 +242,23 @@ int main(void) {
     s32 w20b = WaitIOSWI(ior);
     CHECK(20, s20 == 0 && w20 == (s32)0x8101010A && s20b == 0 && w20b == 0);
 
+    /* 21: a pass-by-value message (CREATEMSG_TAG_DATA_SIZE) gets a copy of
+       the data in its own area; ReplyMsg copies the reply there too */
+    TagArg pt[2] = {{1, (u32)"vport"}, {0, 0}};
+    Item vport = CreateSizedItem(NODE_ID(1, 10), pt, 0);   /* MSGPORTNODE */
+    TagArg mt[3] = {{10, (u32)vport}, {12, 16}, {0, 0}};
+    Item vmsg = CreateSizedItem(NODE_ID(1, 9), mt, 0);     /* MESSAGENODE */
+    u32 payload[2] = {0x11223344, 0x55667788};
+    SendMsg(vport, vmsg, payload, 8);
+    payload[0] = 0;                                  /* the copy must not follow the original */
+    Item got = GetMsg(vport);
+    void* mp = LookupItem(vmsg);
+    u32* area = mp ? (u32*)MSG_DATAPTR(mp) : 0;
+    const int sent_ok = area && area != payload && area[0] == 0x11223344 && area[1] == 0x55667788;
+    u32 reply = 0x99AABBCC;
+    ReplyMsg(vmsg, 0, &reply, 4);
+    CHECK(21, vport > 0 && vmsg > 0 && got == vmsg && sent_ok &&
+              (u32*)MSG_DATAPTR(mp) == area && area[0] == 0x99AABBCC && MSG_DATASIZE(mp) == 4);
+
     return fails ? (int)fails : 0x5A;
 }

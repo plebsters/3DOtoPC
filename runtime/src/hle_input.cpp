@@ -64,8 +64,9 @@ bool Portfolio::broker_receive(HleItem& msg, uint32_t data, uint32_t size) {
         result = broker_focus_ ? broker_focus_ : (listeners_.empty() ? 0 : listeners_.front().port);
     } else if (flavor == 27) {                 // EB_DescribePods: one standard control pad
         // Reply data goes in the message's own buffer: { EB_DescribePodsReply, count, PodDescription[] }.
-        const uint32_t buf = r32(msg.addr + message::DataPtr);
-        const uint32_t room = r32(msg.addr + message::DataPtrSize);
+        // (a pass-by-value message: its own area; else the buffer the sender gave)
+        const uint32_t buf = msg.msg_buffer ? msg.msg_buffer : r32(msg.addr + message::DataPtr);
+        const uint32_t room = msg.msg_buffer ? msg.msg_buffer_size : r32(msg.addr + message::DataPtrSize);
         constexpr uint32_t kPodSize = 40, kLen = 8 + kPodSize;
         if (buf && room >= kLen && guest_range_ok(buf, kLen)) {
             std::vector<uint8_t> z(kLen, 0);

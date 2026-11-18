@@ -25,6 +25,7 @@ enum : uint32_t {
     kAfAddress = 36, kAfSample = 37, kAfSetFlags = 40, kAfClearFlags = 41, kAfFrequency = 42, kAfEnvelope = 43,
     kAfHookName = 44, kAfStartAt = 45, kAfSampleRate = 46, kAfCompressionRatio = 47, kAfCompressionType = 48,
     kAfNumBits = 49, kAfBaseFreq = 51, kAfDataOffset = 55, kAfDataSize = 56, kAfStatus = 60,
+    kAfImageAddress = 63, kAfImageLength = 64, kAfLeaveInPlace = 65,
 };
 constexpr uint32_t kFourccSdx2 = 0x53445832u, kFourccAdp4 = 0x41445034u;   // 'SDX2', 'ADP4'
 
@@ -115,6 +116,11 @@ int32_t Portfolio::audio_instrument(int32_t tmpl) {
     if (it == templates_.end()) return kErrBadItem;
     const int32_t ins = audio_new(kAuInstrument, it->second);
     rt.audio->add_instrument(ins, it->second);
+    ins_template_[ins] = tmpl;
+    // Samples and envelopes attached to the template come with each instrument.
+    if (auto ta = template_attach_.find(tmpl); ta != template_attach_.end())
+        for (const TemplateAttach& a : ta->second)
+            attach(ins, a.sample, a.envelope, a.fifo, a.flags, a.start_at);
     return ins;
 }
 
@@ -192,6 +198,30 @@ int32_t Portfolio::make_sample(uint32_t numbytes, uint32_t tags) {
     Audio::Sample s;
     s.bits = 16; s.channels = 1; s.rate = 44100;
     s.bytes = numbytes;
+    // An AIFF file image already in memory (AF_TAG_IMAGE_ADDRESS/LENGTH): its
+    // sound is used where it is with AF_TAG_LEAVE_IN_PLACE, else copied.
+    uint32_t image = 0, image_len = 0, in_place = 0;
+    tag_value(tags, kAfImageAddress, image); tag_value(tags, kAfImageLength, image_len); tag_value(tags, kAfLeaveInPlace, in_place);
+    if (image && image_len && guest_range_ok(image, image_len)) {
+        size_t off = 0, len = 0;
+        std::string why;
+        if (!parse_aiff(&rt.mem.ram[image], image_len, s, off, len, why)) {
+            rt.log("CreateSample(image %08X, %u bytes): %s", image, image_len, why.c_str());
+            return kErrNotSupported;
+        }
+        s.data_offset = uint32_t(off);
+        s.data_size = uint32_t(len);
+        s.bytes = uint32_t(len);
+        if (in_place) s.addr = image + uint32_t(off);
+        else if (len) {
+            s.addr = alloc(uint32_t(len), kMemFromTop);
+            if (!s.addr) return kErrNoMem;
+            s.host_alloc = s.addr;
+            std::vector<uint8_t> tmp(rt.mem.ram.begin() + image + off, rt.mem.ram.begin() + image + off + len);
+            rt.mem.write_block(s.addr, tmp.data(), uint32_t(len));
+        }
+        s.recompute_frames();
+    }
     apply_sample_tags(s, tags);
     if (!s.addr && s.bytes) {
         s.addr = alloc(s.bytes, kMemFromTop);
@@ -206,7 +236,14 @@ int32_t Portfolio::make_sample(uint32_t numbytes, uint32_t tags) {
 
 int32_t Portfolio::attach(int32_t ins, int32_t sample, int32_t envelope, const std::string& fifo, uint32_t flags,
                           uint32_t start_at) {
-    if (!rt.audio->instrument(ins)) return kErrBadItem;
+    if (!rt.audio->instrument(ins)) {
+        // An attachment to an instrument template applies to every instrument
+        // later made from it (Dragon Lore attaches its sound buffer this way).
+        if (!templates_.count(ins)) return kErrBadItem;
+        const int32_t item = audio_new(kAuAttachment, fifo);
+        template_attach_[ins].push_back({item, sample, envelope, fifo, flags, start_at});
+        return item;
+    }
     Audio::Attachment a;
     a.ins = ins; a.sample = sample; a.envelope = envelope; a.fifo = fifo; a.flags = flags; a.start_at = start_at;
     const int32_t item = audio_new(kAuAttachment, fifo);
@@ -270,6 +307,7 @@ int32_t Portfolio::create_audio_item(uint8_t type, uint32_t tags, const std::str
     case kAuAttachment: {
         uint32_t ins = 0, smp = 0, env = 0, hook = 0, flags = 0, start = 0;
         tag_value(tags, kAfInstrument, ins); tag_value(tags, kAfSample, smp); tag_value(tags, kAfEnvelope, env);
+        if (!ins) tag_value(tags, kAfTemplate, ins);
         tag_value(tags, kAfHookName, hook); tag_value(tags, kAfSetFlags, flags); tag_value(tags, kAfStartAt, start);
         return attach(int32_t(ins), int32_t(smp), int32_t(env), hook ? rstr(hook) : "", flags, start);
     }
@@ -283,6 +321,11 @@ void Portfolio::audio_deleted(HleItem& it) {
     rt.audio->remove(it.num);
     knobs_.erase(it.num);
     templates_.erase(it.num);
+    template_attach_.erase(it.num);
+    ins_template_.erase(it.num);
+    abandoned_.erase(it.num);
+    for (auto& [t, list] : template_attach_)
+        list.erase(std::remove_if(list.begin(), list.end(), [&](const TemplateAttach& a) { return a.item == it.num; }), list.end());
     cue_owner_.erase(it.num);
 }
 
@@ -384,7 +427,11 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
         c.r[0] = uint32_t(item);
     };
     av[-14] = [this](Cpu*) { c.r[0] = uint32_t(make_sample(arg(0), arg(1))); };             // MakeSample(bytes, tags)
-    av[-44] = [this](Cpu*) { c.r[0] = uint32_t(make_sample(0, arg(0))); };                  // CreateSample(tags)
+    av[-44] = [this](Cpu*) {                                                                // CreateSample(tags)
+        if (std::getenv("TDORT_SLEEP_TRACE"))
+            each_tag(arg(0), [&](uint32_t t, uint32_t v) { rt.log("  CreateSample tag %u = %08X", t, v); });
+        c.r[0] = uint32_t(make_sample(0, arg(0)));
+    };
     av[-39] = [this](Cpu*) {                                 // CreateDelayLine(bytes, channels, loop)
         Audio::Sample s; s.bits = 16; s.channels = int(std::max<uint32_t>(1, arg(1))); s.bytes = arg(0);
         s.addr = s.host_alloc = alloc(std::max<uint32_t>(16, arg(0)), kMemFromTop);
@@ -534,8 +581,26 @@ void Portfolio::install_audio_swis() {
         c.r[0] = 0;
     });
     A(23, "SetMasterTuning", [this](Cpu*) { c.r[0] = 0; });
-    A(24, "AbandonInstrument", [this](Cpu*) { rt.audio->stop(int32_t(arg(0))); c.r[0] = 0; });
-    A(25, "AdoptInstrument", [this](Cpu*) { c.r[0] = uint32_t(audio_instrument(int32_t(arg(0)))); });
+    // AbandonInstrument stops an instrument and leaves it for AdoptInstrument,
+    // which hands back an abandoned instrument of that template, or 0 when
+    // there is none (the music library then makes a new one).
+    A(24, "AbandonInstrument", [this](Cpu*) {
+        const int32_t ins = int32_t(arg(0));
+        if (!rt.audio->instrument(ins)) { c.r[0] = uint32_t(kErrBadItem); return; }
+        rt.audio->stop(ins);
+        abandoned_.insert(ins);
+        c.r[0] = 0;
+    });
+    A(25, "AdoptInstrument", [this](Cpu*) {
+        const int32_t tmpl = int32_t(arg(0));
+        if (!templates_.count(tmpl)) { c.r[0] = uint32_t(kErrBadItem); return; }
+        if (std::getenv("TDORT_OLD_ADOPT")) { c.r[0] = uint32_t(audio_instrument(tmpl)); return; }
+        for (auto it = abandoned_.begin(); it != abandoned_.end(); ++it) {
+            auto t = ins_template_.find(*it);
+            if (t != ins_template_.end() && t->second == tmpl) { c.r[0] = uint32_t(*it); abandoned_.erase(it); return; }
+        }
+        c.r[0] = 0;
+    });
     A(26, "ScavengeInstrument", [this](Cpu*) { c.r[0] = uint32_t(audio_instrument(int32_t(arg(0)))); });
     A(27, "SetAudioItemInfo", [this](Cpu*) {
         if (std::getenv("TDORT_SLEEP_TRACE"))

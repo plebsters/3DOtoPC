@@ -37,6 +37,7 @@ struct HleItem {
     FILE*    fp = nullptr;
     // IOReq
     int32_t  device = 0, reply_port = 0, msg_item = 0;
+    uint32_t msg_buffer = 0, msg_buffer_size = 0;   // a pass-by-value message's own data area
     // MsgPort
     std::deque<int32_t> queue;
     uint32_t signal = 0;
@@ -76,6 +77,10 @@ struct HleTask {
     int32_t  parent = 0;            // task that loaded this program (gets SIGF_DEADTASK when it ends)
     uint32_t owned_stack = 0;       // stack memory to free when the task dies
     bool     program = false;       // a separately loaded executable, not a thread
+    uint32_t image_lo = 0, image_hi = 0;
+    uint64_t past_sleep_frame = ~0ull; uint32_t past_sleeps = 0;   // SleepUntilTime with a time gone, this frame   // a loaded program's image (translated blocks mapped there)
+    int32_t  exit_msg = 0;          // CREATETASK_TAG_MSGFROMCHILD: replied to the creator on exit
+    int32_t  exit_status = 0;       // SetExitStatus / exit() code
     std::string cwd;                // current directory, guest-normalized ("/Data"); each task has its own
     std::string name;
     std::deque<CallRec> calls;      // its last OS calls (repeats counted)
@@ -124,7 +129,9 @@ public:
     void        note_call(const char* name, const uint32_t* r, uint32_t site);
     std::string describe_wait(const HleTask& t, uint32_t mask);
     std::string write_report(const std::string& ended, uint32_t screen_change_frame);
-    uint32_t    last_input_frame_ = 0;    // last time the game handed back a controller event
+    uint32_t    last_input_frame_ = 0;
+    struct ReadRec { std::string path; uint32_t block, bytes, dest, frame; };
+    std::deque<ReadRec> recent_reads_;     // last disc reads, for the diagnosis report    // last time the game handed back a controller event
     std::vector<uint32_t> read_sjis(uint32_t a);
     int32_t  write_sjis(const std::vector<uint32_t>& t, uint32_t out, uint32_t size, uint8_t filler, bool ascii);
     void     codec_emit_byte(Codec& d, uint8_t c, std::vector<uint32_t>& out);
@@ -197,6 +204,11 @@ private:
     int32_t make_envelope(uint32_t points, uint32_t count, int32_t sus_b, int32_t sus_e);
     static bool parse_aiff(const uint8_t* d, size_t n, Audio::Sample& s, size_t& data_off, size_t& data_len, std::string& why);
     std::map<int32_t, std::string> templates_;                       // instrument templates by item
+    struct TemplateAttach { int32_t item, sample, envelope; std::string fifo; uint32_t flags, start_at; };
+    std::map<int32_t, std::vector<TemplateAttach>> template_attach_;
+    std::map<int32_t, int32_t> ins_template_;                         // instrument -> the template it was made from
+    std::set<int32_t> abandoned_;
+    uint32_t putc_loop_ = 0;                                          // ARM loop that feeds vfprintf text to the C library's putc                                     // instruments given up with AbandonInstrument  // attached to a template: copied to each instrument made from it
     std::map<int32_t, std::pair<int32_t, std::string>> knobs_;      // knob item -> (instrument, knob name)
     std::map<int32_t, int32_t> cue_owner_;                          // cue item -> task that created it
     std::map<std::string, uint32_t> knob_name_strings_;

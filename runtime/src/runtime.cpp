@@ -205,6 +205,84 @@ void Runtime::install_recompiled() {
     }
 }
 
+// ---- translated programs loaded at run time --------------------------------
+
+bool Runtime::map_module(const std::string& file_hash, uint32_t base, uint32_t size, uint32_t entry_pc, const std::string& name) {
+    if (!recomp_enabled_) return false;
+    for (uint32_t i = 0; i < tdort_module_count; ++i) {
+        const ModuleInfo& mi = tdort_modules[i];
+        if (!mi.entries || file_hash != mi.file_hash) continue;
+        unmap_modules(base, base + size);            // whatever was mapped there before is gone
+        LoadedModule m;
+        m.info = &mi; m.base = base; m.size = size; m.entry_pc = entry_pc; m.name = name;
+        modules_.push_back(std::move(m));
+        return true;
+    }
+    return false;
+}
+
+void Runtime::unmap_modules(uint32_t lo, uint32_t hi) {
+    for (size_t i = 0; i < modules_.size();) {
+        LoadedModule& m = modules_[i];
+        if (m.base < hi && lo < m.base + m.size) {
+            if (m.active)
+                for (uint32_t g = m.base >> kGranuleShift; g <= (m.base + m.size - 1) >> kGranuleShift && g < kGranuleCount; ++g)
+                    mem.code_granule[g] = 0;
+            modules_.erase(modules_.begin() + long(i));
+        } else ++i;
+    }
+}
+
+// At its entry point the program has relocated itself: each translated block
+// whose instruction words match the program in memory is mapped; the rest
+// (code the relocation changed, or data the analysis took for code) stays
+// interpreted.
+void Runtime::activate_module(LoadedModule& m) {
+    m.active = true;
+    m.lookup.assign((m.size + 3) / 4, -1);
+    uint32_t ok = 0;
+    for (uint32_t k = 0; k < m.info->count; ++k) {
+        const ModuleEntry& e = m.info->entries[k];
+        if (!e.fn || e.offset + e.byte_len > m.size || m.base + e.offset + e.byte_len > kRamEnd) continue;
+        uint32_t h = 2166136261u;
+        for (uint32_t q = 0; q < e.byte_len; ++q) { h ^= mem.ram[m.base + e.offset + q]; h *= 16777619u; }
+        if (h != e.check) continue;
+        m.lookup[e.offset >> 2] = int32_t(k);
+        ++ok;
+    }
+    // From now on, writes over this code invalidate it as for the main program.
+    for (uint32_t g = m.base >> kGranuleShift; g <= (m.base + m.size - 1) >> kGranuleShift && g < kGranuleCount; ++g) {
+        mem.code_granule[g] = 1;
+        mem.granule_dirty[g] = 0;
+    }
+    log("program \"%s\": %u of %u translated blocks match and run natively (loaded at %08X)", m.name.c_str(), ok, m.info->count, m.base);
+}
+
+bool Runtime::run_module_block(uint32_t pc) {
+    for (LoadedModule& m : modules_) {
+        if (pc < m.base || pc >= m.base + m.size) continue;
+        if (!m.active) {
+            if (pc != m.entry_pc) return false;      // still relocating itself
+            activate_module(m);
+        }
+        const int32_t idx = m.lookup[(pc - m.base) >> 2];
+        if (idx < 0) return false;
+        const ModuleEntry& e = m.info->entries[idx];
+        const uint32_t a = m.base + e.offset;
+        for (uint32_t g = a >> kGranuleShift; g <= (a + e.byte_len - 1) >> kGranuleShift; ++g)
+            if (mem.granule_dirty[g]) {
+                m.lookup[(pc - m.base) >> 2] = -1;
+                ++stats.invalidations;
+                return false;
+            }
+        cpu.mod_base = m.base;
+        e.fn(&cpu);
+        ++stats.recomp_blocks;
+        return true;
+    }
+    return false;
+}
+
 bool Runtime::block_valid(uint32_t idx) const {
     const RecompEntry& e = tdort_recomp_table[idx];
     uint32_t g0 = e.guest_addr >> kGranuleShift, g1 = (e.guest_addr + e.byte_len - 1) >> kGranuleShift;
@@ -237,9 +315,32 @@ void Runtime::run_for(uint64_t budget) {
         const uint32_t pc = cpu.r[15];
         if (pc >= kTrapBase && pc < kTrapBase + kTrapSize) { handle_trap(pc); continue; }
         ring_[ring_pos_++ & 63] = pc;
+        // TDORT_BREAK=<hex pc>: log the registers whenever a block starts there
+        // (with --interp, at any instruction boundary the interpreter loop sees).
+        static const uint32_t brk = [] { const char* b = std::getenv("TDORT_BREAK"); return b ? uint32_t(std::strtoul(b, nullptr, 16)) : 0u; }();
+        if (brk && pc == brk)
+            log("break %08X: r0-r7 %08X %08X %08X %08X %08X %08X %08X %08X r8-r14 %08X %08X %08X %08X %08X %08X %08X", pc,
+                cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[4], cpu.r[5], cpu.r[6], cpu.r[7],
+                cpu.r[8], cpu.r[9], cpu.r[10], cpu.r[11], cpu.r[12], cpu.r[13], cpu.r[14]);
+        // TDORT_BREAK_DUMP=<hex address>: also log 32 words there at the break
+        // (or "r<n>": at the address in that register)
+        static const char* brk_dump_s = std::getenv("TDORT_BREAK_DUMP");
+        static const uint32_t brk_dump_fixed = brk_dump_s && brk_dump_s[0] != 'r' ? uint32_t(std::strtoul(brk_dump_s, nullptr, 16)) : 0u;
+        const uint32_t brk_dump = brk_dump_s && brk_dump_s[0] == 'r' ? (cpu.r[std::atoi(brk_dump_s + 1) & 15] & ~3u) : brk_dump_fixed;
+        if (brk && pc == brk && brk_dump && brk_dump + 128 <= kRamEnd)
+            for (uint32_t k = 0; k < 32; k += 8)
+                log("      [%08X] %08X %08X %08X %08X %08X %08X %08X %08X", brk_dump + k * 4,
+                    load_be32(&mem.ram[brk_dump + k * 4]), load_be32(&mem.ram[brk_dump + k * 4 + 4]), load_be32(&mem.ram[brk_dump + k * 4 + 8]),
+                    load_be32(&mem.ram[brk_dump + k * 4 + 12]), load_be32(&mem.ram[brk_dump + k * 4 + 16]), load_be32(&mem.ram[brk_dump + k * 4 + 20]),
+                    load_be32(&mem.ram[brk_dump + k * 4 + 24]), load_be32(&mem.ram[brk_dump + k * 4 + 28]));
+        if (brk && pc == brk && cpu.r[13] + 32 <= kRamEnd)
+            log("      [sp] %08X %08X %08X %08X %08X %08X %08X %08X", load_be32(&mem.ram[cpu.r[13]]), load_be32(&mem.ram[cpu.r[13] + 4]),
+                load_be32(&mem.ram[cpu.r[13] + 8]), load_be32(&mem.ram[cpu.r[13] + 12]), load_be32(&mem.ram[cpu.r[13] + 16]),
+                load_be32(&mem.ram[cpu.r[13] + 20]), load_be32(&mem.ram[cpu.r[13] + 24]), load_be32(&mem.ram[cpu.r[13] + 28]));
         if (os && os->mt) os->preempt();     // may switch to another task
         if (cpu.r[15] != pc) continue;
         if (!check_pc(pc)) break;
+        if (recomp_enabled_ && !modules_.empty() && lookup_[pc >> 2] < 0 && run_module_block(pc)) continue;
         if (recomp_enabled_ && pc < kRamEnd) {
             int32_t idx = lookup_[pc >> 2];
             if (idx >= 0) {
@@ -250,7 +351,14 @@ void Runtime::run_for(uint64_t budget) {
                 }
                 lookup_[pc >> 2] = -1;   // overwritten: fall back permanently
                 ++stats.invalidations;
-                log("recompiled block %08X invalidated by a write; interpreting", pc);
+                {   // who wrote over it
+                    const RecompEntry& e = tdort_recomp_table[idx];
+                    uint32_t by = 0; const char* call = nullptr;
+                    for (uint32_t g = e.guest_addr >> kGranuleShift; g <= (e.guest_addr + e.byte_len - 1) >> kGranuleShift; ++g)
+                        if (mem.granule_dirty[g]) { by = mem.dirty_by[g]; call = mem.dirty_call[g]; break; }
+                    if (by == 0xFFFFFFFFu) log("recompiled block %08X invalidated by a write from the OS (%s); interpreting", pc, call ? call : "start-up or a device");
+                    else log("recompiled block %08X invalidated by a write from game code near %08X; interpreting", pc, by);
+                }
             }
         }
         interp_block();
@@ -328,6 +436,7 @@ int Runtime::run(Platform* platform) {
             if ((pad_state & PadNextDisc) && !(prev & PadNextDisc) && os) os->next_disc();
             prev = pad_state;
         }
+        mem.host_call = "a device completing at the frame start";
         if (os) os->frame(pad_state);
         if (os && ++frames_ % 120 == 0 && (frames_ <= 120 * 30 || std::getenv("TDORT_AUDIO_STATUS")))
             log("%s", os->status_line(frames_).c_str());
@@ -408,7 +517,7 @@ static void watch_check(Runtime& rt, const char* what) {
     static uint32_t last = 0; static bool init = false;
     if (!addr || addr + 4 > kRamEnd) return;
     const uint32_t v = load_be32(&rt.mem.ram[addr]);
-    if (!init) { init = true; last = v; return; }
+    if (!init) { init = true; last = v; rt.log("watch %08X: %08X at the first OS call", addr, v); return; }
     if (v != last) { rt.log("watch %08X: %08X -> %08X before %s (pc=%08X lr=%08X)", addr, last, v, what, rt.cpu.r[15], rt.cpu.r[14]); last = v; }
 }
 
@@ -428,6 +537,7 @@ bool Runtime::handle_swi(uint32_t comment, uint32_t pc) {
         log("call %llu: %s(%08X, %08X, %08X, %08X) at %08X", (unsigned long long)stats.hle_calls,
             it->second.name.c_str(), cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], pc);
     if (os) os->note_call(it->second.name.c_str(), cpu.r, pc);
+    mem.host_call = it->second.name.c_str();
     cpu.r[15] = pc + 4;          // handlers may redirect by writing r15
     retry_pc = pc;
     it->second.fn(&cpu);
@@ -444,6 +554,7 @@ void Runtime::handle_trap(uint32_t addr) {
     if (idx < traps_.size()) {
         ++traps_[idx].calls;
         if (os) os->note_call(traps_[idx].name.c_str(), cpu.r, ret - 4);
+        mem.host_call = traps_[idx].name.c_str();
         if ((cfg.trace || stats.hle_calls <= kHistoryCalls) && !repeat_call(ret - 4, cpu.r[0], cpu.r[1]))
             log("call %llu: %s(%08X, %08X, %08X, %08X) from %08X", (unsigned long long)stats.hle_calls,
                 traps_[idx].name.c_str(), cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], ret - 4);

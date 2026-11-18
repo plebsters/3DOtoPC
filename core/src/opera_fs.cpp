@@ -9,6 +9,7 @@
 // Directory block: next(i32) prev(i32) flags first_free first_entry_offset,
 // then entries: flags id type[4] block_size byte_count block_count burst gap
 // name[32] last_avatar_index avatars[last+1].
+#include "tdort/host_name.h"
 #include "tdo/opera_fs.h"
 #include <algorithm>
 #include <cctype>
@@ -141,7 +142,15 @@ bool OperaDisc::extract_all(const std::string& out_dir, std::string& err,
     size_t i = 0;
     for (auto& e : entries_) {
         ++i;
-        fs::path dst = fs::u8path(out_dir) / fs::u8path(e.path.substr(1));
+        // each name stored so that Windows accepts it (tdort/host_name.h)
+        fs::path dst = fs::u8path(out_dir);
+        {
+            std::string comp;
+            for (char ch : e.path.substr(1) + "/") {
+                if (ch == '/') { if (!comp.empty()) dst /= fs::u8path(tdort::encode_host_name(comp)); comp.clear(); }
+                else comp += ch;
+            }
+        }
         std::error_code ec;
         if (e.is_dir) { fs::create_directories(dst, ec); continue; }
         fs::create_directories(dst.parent_path(), ec);

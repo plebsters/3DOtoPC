@@ -439,6 +439,17 @@ void Portfolio::install_kernel_vectors() {
     v[kvFreeMem]    = [this](Cpu*) { free_mem(arg(1)); };
     v[kvScavengeMem] = [this](Cpu*) { c.r[0] = 0; };
     v[kvFindImage]   = [this](Cpu*) { c.r[0] = 0; };          // FindImage: no ROM images here
+    // -31: the C library's stack-limit check lands here (__rt_stkovf) when a
+    // function needs more stack than the limit register (r10) allows; ip holds
+    // the lowest address it needs. The kernel grows the stack into the memory
+    // below and hands back a lower limit; every other register is kept.
+    v[-31] = [this](Cpu*) {
+        const uint32_t need = c.r[12];
+        const uint32_t lim = need > 0x1000 + 256 ? need - 256 : 0x1000;
+        if (lim < c.r[10]) c.r[10] = lim;
+        static int logged = 0;
+        if (logged++ < 3) rt.log("stack of task %s extended: limit now %08X (sp %08X)", cur().name.c_str(), c.r[10], c.r[13]);
+    };
     v[-17] = [](Cpu*) {};   // UniversalInsertNode: replaced by ARM code after the folio is made (below)
     // Memory lists: a program's private pools. Their memory comes from the
     // task's normal allocator here, so a MemList is just a small marker block.
@@ -472,7 +483,15 @@ void Portfolio::install_kernel_vectors() {
         if (guest_range_ok(d, n) && guest_range_ok(s, n)) { std::memmove(&rt.mem.ram[d], &rt.mem.ram[s], n); rt.mem.invalidate(d, n); }
         c.r[0] = d;
     };
-    v[kvLookupItem] = [this](Cpu*) { HleItem* it = item(int32_t(arg(0))); c.r[0] = it ? it->addr : 0; };
+    // Item 0 is the kernel itself: LookupItem(0) gives KernelBase (a folio
+    // node). The 1.x WaitIO looks up io_MsgItem, which is 0 for a request
+    // without a reply port, and checks the node type; FIFA's timer task
+    // depends on it.
+    v[kvLookupItem] = [this](Cpu*) {
+        if (arg(0) == 0) { c.r[0] = kbase_; return; }
+        HleItem* it = item(int32_t(arg(0)));
+        c.r[0] = it ? it->addr : 0;
+    };
     v[kvCheckItem]  = [this](Cpu*) {
         HleItem* it = item(int32_t(arg(0)));
         c.r[0] = (it && it->subsys == uint8_t(arg(1)) && it->type == uint8_t(arg(2))) ? it->addr : 0;
@@ -544,6 +563,55 @@ void Portfolio::install_kernel_vectors() {
         // The text goes into that buffer instead of the log (Slam 'n Jam
         // builds knob names such as "LeftGain3" this way).
         const uint32_t st = arg(0);
+        // The character-output routine is the fifth argument (on the stack;
+        // the C library's wrapper passes its own caller's r3 through as the
+        // fourth). When there is one, the text goes through it, as on the
+        // console.
+        {
+            auto plausible = [&](uint32_t a) {
+                if (!a || (a & 3) || a < 0x100 || !guest_range_ok(a, 8)) return false;
+                return (r32(a) >> 28) == 0xE && (r32(a + 4) >> 28) == 0xE;   // unconditional ARM instructions
+            };
+            const uint32_t put = plausible(arg(4)) ? arg(4) : 0;
+            if (put && putc_loop_ && !out.empty() && out.size() < 0x4000 && !std::getenv("TDORT_OLD_PRINTF")) {
+                const uint32_t area = (4 + uint32_t(out.size()) + 3) & ~3u;
+                const uint32_t sp = (c.r[13] - area) & ~3u;
+                if (guest_range_ok(sp, area)) {
+                    w32(sp, c.r[13] - sp);
+                    rt.mem.write_block(sp + 4, out.data(), uint32_t(out.size()));
+                    // Lines of text (printf) are also logged; names built with
+                    // sprintf have no line break and aren't.
+                    static const uint32_t kStorePut[5] = {0xE20000FF, 0xE5912000, 0xE4C20001, 0xE5812000, 0xE1A0F00E};
+                    bool store = true;
+                    for (int k = 0; k < 5 && store; ++k) store = r32(put + 4 * k) == kStorePut[k];
+                    if (!store && out.find('\n') != std::string::npos) {
+                        std::string t = out;
+                        while (!t.empty() && (t.back() == '\n' || t.back() == '\r')) t.pop_back();
+                        if (!t.empty()) rt.log("guest printf: %s", t.c_str());
+                    }
+                    c.r[13] = sp;
+                    c.r[0] = st; c.r[1] = sp + 4; c.r[2] = put; c.r[3] = uint32_t(out.size());
+                    c.r[15] = putc_loop_;      // returns to the caller's lr when done
+                    return;
+                }
+            }
+        }
+        // The OS call also takes a character-output routine (fifth argument).
+        // The C library's sprintf passes one that stores each character at a
+        // pointer held in the stream word and moves it on: do that here.
+        // (Cyberia builds its camera file names, "CAM000"..., this way.)
+        if (const uint32_t put = arg(4); put && guest_range_ok(put, 20) && guest_range_ok(st, 4)) {
+            static const uint32_t kStorePut[5] = {0xE20000FF, 0xE5912000, 0xE4C20001, 0xE5812000, 0xE1A0F00E};
+            bool match = true;
+            for (int k = 0; k < 5 && match; ++k) match = r32(put + 4 * k) == kStorePut[k];
+            const uint32_t ptr = match ? r32(st) : 0;
+            if (match && guest_range_ok(ptr, uint32_t(out.size()))) {
+                rt.mem.write_block(ptr, out.data(), uint32_t(out.size()));
+                w32(st, ptr + uint32_t(out.size()));
+                c.r[0] = uint32_t(out.size());
+                return;
+            }
+        }
         if (guest_range_ok(st, 12)) {
             const uint32_t pos = r32(st), end = r32(st + 4), base = r32(st + 8);
             if (base && base <= pos && pos <= end && end - base < 0x100000 && guest_range_ok(base, end - base)) {
@@ -584,7 +652,7 @@ void Portfolio::install_kernel_vectors() {
     // In the 1.x SDKs WaitPort is kernel vector -24 (a SWI in later ones).
     v[-24] = [this](Cpu*) { wait_port(int32_t(arg(0)), int32_t(arg(1))); };
     v[kvStartupInit] = [](Cpu*) { /* must preserve r0/r1 (argc/argv): cstartup calls main next */ };
-    v[kvExit] = [this](Cpu*) { rt.log("guest exit(%d) from \"%s\"", int32_t(c.r[0]), cur().name.c_str()); exit_current("exit()"); };
+    v[kvExit] = [this](Cpu*) { rt.log("guest exit(%d) from \"%s\"", int32_t(c.r[0]), cur().name.c_str()); cur().exit_status = int32_t(c.r[0]); exit_current("exit()"); };
 
     int32_t kitem = 0;
     kbase_ = make_folio("kernel", kSubsysKernel, kKernelVectorCount, v, &kitem);
@@ -607,6 +675,24 @@ void Portfolio::install_kernel_vectors() {
         };
         const uint32_t at = rt.hle_code(code, sizeof code / 4);
         w32(kbase_ + uint32_t(-17 * 4), at);
+    }
+    // The character-output loop for vfprintf (kernel vector -21): the C
+    // library passes its own routine, putc(ch, stream), and that is what puts
+    // the text where it goes (a string for sprintf, a file, the debug port).
+    // The text is formatted here, left on the stack under a word holding the
+    // size of that area, and this loop hands it to the routine a character
+    // at a time:
+    //   stmfd sp!,{r4-r8,lr}; r4=stream r5=text r6=putc r7=count r8=0
+    //   loop: if (r8 >= r7) goto done; putc(text[r8], stream); r8++; goto loop
+    //   done: r0=count; ldmfd sp!,{r4-r8,lr}; sp += [sp]; return
+    {
+        static const uint32_t code[] = {
+            0xE92D41F0, 0xE1A04000, 0xE1A05001, 0xE1A06002, 0xE1A07003, 0xE3A08000,   // 0-5
+            0xE1580007, 0xAA000005,                                                   // 6 loop
+            0xE7D50008, 0xE1A01004, 0xE1A0E00F, 0xE1A0F006, 0xE2888001, 0xEAFFFFF7,   // 8
+            0xE1A00007, 0xE8BD41F0, 0xE59DC000, 0xE08DD00C, 0xE1A0F00E,               // 14 done
+        };
+        putc_loop_ = rt.hle_code(code, sizeof code / 4);
     }
 
     // Current task and the system lists games may walk.
@@ -877,13 +963,31 @@ void Portfolio::install_kernel_swis() {
     K(kSystemScavengeMem, "SystemScavengeMem", [this](Cpu*) { c.r[0] = 0; });
 
     // --- messages
-    K(kSendMsg, "SendMsg", [this](Cpu*) {
+    // Message data: a pass-by-value message gets a copy in its own area.
+    auto set_msg_data = [this](HleItem& msg, uint32_t data, uint32_t size) {
+        if (msg.msg_buffer) {
+            const uint32_t n = std::min(size, msg.msg_buffer_size);
+            if (n && data && data != msg.msg_buffer && guest_range_ok(data, n)) {
+                std::vector<uint8_t> tmp(rt.mem.ram.begin() + data, rt.mem.ram.begin() + data + n);
+                rt.mem.write_block(msg.msg_buffer, tmp.data(), n);
+            }
+            w32(msg.addr + message::DataPtr, msg.msg_buffer);
+            w32(msg.addr + message::DataSize, n);
+        } else {
+            w32(msg.addr + message::DataPtr, data);
+            w32(msg.addr + message::DataSize, size);
+        }
+    };
+    K(kSendMsg, "SendMsg", [this, set_msg_data](Cpu*) {
         HleItem* port = item(int32_t(arg(0)));
         HleItem* msg = item(int32_t(arg(1)));
         if (!port || !msg || port->kind != ItemKind::MsgPort) { c.r[0] = uint32_t(kErrBadItem); return; }
-        w32(msg->addr + message::DataPtr, arg(2));
-        w32(msg->addr + message::DataSize, arg(3));
-        if (port->num == broker_port_) { broker_receive(*msg, arg(2), arg(3)); c.r[0] = 0; return; }
+        set_msg_data(*msg, arg(2), arg(3));
+        if (port->num == broker_port_) {
+            broker_receive(*msg, r32(msg->addr + message::DataPtr), r32(msg->addr + message::DataSize));
+            c.r[0] = 0;
+            return;
+        }
         send_message(*port, *msg);
         c.r[0] = 0;
     });
@@ -904,12 +1008,11 @@ void Portfolio::install_kernel_swis() {
         unqueue(*msg);
         c.r[0] = uint32_t(msg->num);
     });
-    K(kReplyMsg, "ReplyMsg", [this](Cpu*) {
+    K(kReplyMsg, "ReplyMsg", [this, set_msg_data](Cpu*) {
         HleItem* msg = item(int32_t(arg(0)));
         if (!msg) { c.r[0] = uint32_t(kErrBadItem); return; }
         w32(msg->addr + message::Result, arg(1));
-        w32(msg->addr + message::DataPtr, arg(2));
-        w32(msg->addr + message::DataSize, arg(3));
+        set_msg_data(*msg, arg(2), arg(3));
         if (HleItem* port = item(msg->reply_port)) send_message(*port, *msg);
         c.r[0] = 0;
     });
@@ -981,10 +1084,36 @@ void Portfolio::install_kernel_swis() {
         x ^= x << 13; x ^= x >> 17; x ^= x << 5;
         c.r[0] = x;
     });
-    K(kSetExitStatus, "SetExitStatus", [this](Cpu*) { c.r[0] = 0; });
+    K(kSetExitStatus, "SetExitStatus", [this](Cpu*) { cur().exit_status = int32_t(arg(0)); c.r[0] = 0; });
     // SWI 14 is not in the public headers; the C library's putc() issues it
     // for stdout/stderr with the character in r1 (seen in Gex). Debug console.
     K(14, "DebugPutChar", [this](Cpu*) {
+        // Some libraries pass a format in r0 and its arguments in r1-r3
+        // (FIFA's debug messages: "%s", text): that is a line of text.
+        if (c.r[0] >= 0x100 && guest_range_ok(c.r[0], 2) && c.r[1] >= 0x100) {
+            const std::string fmt = rstr(c.r[0], 256);
+            if (!fmt.empty() && fmt.find('%') != std::string::npos) {
+                std::string out;
+                int a = 1;
+                for (size_t i = 0; i < fmt.size(); ++i) {
+                    if (fmt[i] != '%' || i + 1 >= fmt.size()) { out += fmt[i]; continue; }
+                    size_t j = i + 1;
+                    while (j < fmt.size() && std::strchr("-+ #0123456789.l", fmt[j])) ++j;
+                    const char conv = j < fmt.size() ? fmt[j] : 0;
+                    const uint32_t v = a <= 3 ? c.r[a] : 0;
+                    char b[64];
+                    if (conv == 's') { ++a; out += guest_range_ok(v, 1) ? rstr(v, 240) : "(?)"; }
+                    else if (conv == 'd' || conv == 'i') { ++a; std::snprintf(b, sizeof b, "%d", int32_t(v)); out += b; }
+                    else if (conv == 'x' || conv == 'X' || conv == 'p') { ++a; std::snprintf(b, sizeof b, "%x", v); out += b; }
+                    else if (conv == 'c') { ++a; out += char(v); }
+                    else if (conv == '%') out += '%';
+                    i = j;
+                }
+                while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+                rt.log("guest stdout: %s", out.c_str());
+                return;
+            }
+        }
         const char ch = char(c.r[1] & 0xFF);
         if (ch == '\n' || debug_line_.size() > 240) { rt.log("guest stdout: %s", debug_line_.c_str()); debug_line_.clear(); }
         if (ch != '\n' && ch != '\r') debug_line_ += ch;
@@ -1099,11 +1228,25 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
             return p.num;
         }
         case kNodeMessage: {
-            uint32_t reply = 0;
+            uint32_t reply = 0, data_size = 0;
             tag_value(tags, kTagMsgReplyPort, reply);
-            HleItem& m = new_item(ItemKind::Message, kSubsysKernel, kNodeMessage, std::max(size, message::Size), name);
+            // A pass-by-value message (CREATEMSG_TAG_DATA_SIZE) carries its own
+            // data area after the message: SendMsg and ReplyMsg copy the data
+            // into it, and replies such as the event broker's pod list land there.
+            tag_value(tags, kTagMsgDataSize, data_size);
+            if (data_size > 0x100000) data_size = 0;
+            HleItem& m = new_item(ItemKind::Message, kSubsysKernel, kNodeMessage, std::max(size, message::Size) + data_size, name);
             m.reply_port = int32_t(reply);
             w32(m.addr + message::ReplyPort, reply);
+            if (data_size && std::getenv("TDORT_DEBUG_MSG"))
+                each_tag(tags, [&](uint32_t t, uint32_t a) { rt.log("  message %d tag %u = %08X", m.num, t, a); });
+            if (data_size) {
+                m.msg_buffer = m.addr + std::max(size, message::Size);
+                m.msg_buffer_size = data_size;
+                w32(m.addr + message::DataPtr, m.msg_buffer);
+                w32(m.addr + message::DataPtrSize, data_size);
+                w8(m.addr + node::Flags, uint8_t(r8(m.addr + node::Flags) | 0x08));   // MESSAGE_PASS_BY_VALUE
+            }
             return m.num;
         }
         case kNodeTask: {
@@ -1129,6 +1272,40 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
         }
     }
     if (subsys == kSubsysAudio) return create_audio_item(type, tags, name);
+    // CreateBitmap(tags): a bitmap over a buffer the program supplies
+    // (CBM_TAG_WIDTH 11, HEIGHT 12, BUFFER 13, CLIPWIDTH..CLIPY 14-17,
+    // CECONTROL 19). FIFA's movie player decodes straight into one.
+    if (subsys == kSubsysGraphics && type == kNodeBitmap && !std::getenv("TDORT_OLD_BITMAP")) {
+        uint32_t w = 320, h = 240, buf = 0, cw = 0, ch = 0, cx = 0, cy = 0, ce = 0;
+        bool has_cw = false, has_ch = false, has_ce = false;
+        each_tag(tags, [&](uint32_t t, uint32_t a) {
+            switch (t) {
+            case 11: w = a; break;
+            case 12: h = a; break;
+            case 13: buf = a; break;
+            case 14: cw = a; has_cw = true; break;
+            case 15: ch = a; has_ch = true; break;
+            case 16: cx = a; break;
+            case 17: cy = a; break;
+            case 19: ce = a; has_ce = true; break;
+            default: break;
+            }
+        });
+        if (w == 0 || h == 0 || w > 2048 || h > 2048) return kErrNoMem;
+        if (!buf) buf = alloc(w * h * 2, kMemVram);
+        HleItem& bm = new_item(ItemKind::Bitmap, kSubsysGraphics, kNodeBitmap, std::max(size, bitmap::Size), name);
+        bm.buffer = buf;
+        w32(bm.addr + bitmap::Buffer, buf);
+        w32(bm.addr + bitmap::Width, w);
+        w32(bm.addr + bitmap::Height, h);
+        w32(bm.addr + bitmap::ClipWidth, has_cw ? cw : w);
+        w32(bm.addr + bitmap::ClipHeight, has_ch ? ch : h);
+        w32(bm.addr + bitmap::ClipX, cx);
+        w32(bm.addr + bitmap::ClipY, cy);
+        if (has_ce) w32(bm.addr + bitmap::CEControl, ce);
+        rt.log("CreateBitmap(%ux%u, buffer %08X) -> %d", w, h, buf, bm.num);
+        return bm.num;
+    }
     rt.log("CreateItem(%04X \"%s\"): generic item", ctype, name.c_str());
     HleItem& g = new_item(ItemKind::Generic, subsys, type, std::max<uint32_t>(size, node::ItemNodeSize), name);
     w8(g.addr + node::Priority, uint8_t(pri));

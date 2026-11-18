@@ -35,9 +35,19 @@ struct EmitOptions {
     uint32_t blocks_per_file = 250;      // small files keep compiler memory low
 };
 
-// Writes recomp_*.cpp and recomp_table.cpp into out_dir. Returns file list.
+// Another program on the disc (loaded by the game at run time), translated
+// so that it runs wherever it is loaded.
+struct ModuleSource {
+    std::string name;            // path on the disc
+    std::string file_hash;       // fnv1a64 hex of the whole file: the runtime matches on it
+    tdort::AifImage image;
+    Analysis analysis;
+};
+
+// Writes recomp_*.cpp, mod*_*.cpp and recomp_table.cpp into out_dir. Returns file list.
 std::vector<std::string> emit_cpp(const tdort::AifImage& img, const Analysis& a,
-                                  const EmitOptions& opt, const std::string& out_dir);
+                                  const EmitOptions& opt, const std::string& out_dir,
+                                  const std::vector<ModuleSource>& modules = {});
 
 // Writes a listing (disassembly with block markers) for inspection.
 void write_listing(const tdort::AifImage& img, const Analysis& a, const std::string& path);

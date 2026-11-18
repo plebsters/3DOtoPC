@@ -11,6 +11,8 @@ extern "C" const uint32_t tdort_recomp_count = 0;
 extern "C" const char tdort_image_hash[] = "";
 extern "C" const char tdort_game_name[] = "test";
 extern "C" const uint32_t tdort_image_base = 0;
+extern "C" const tdort::ModuleInfo tdort_modules[] = {{"", "", 0, 0, nullptr}};
+extern "C" const uint32_t tdort_module_count = 0;
 
 static int failures = 0;
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #x); ++failures; } } while (0)

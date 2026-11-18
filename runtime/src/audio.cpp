@@ -41,6 +41,10 @@ Audio::Kind Audio::classify(const std::string& tmpl, bool* fixed, bool* half, bo
         if (*half) *fixed = true;     // half-rate players run at a fixed 22050 Hz
         return Kind::Sampler;
     }
+    // The EZFlix movie library's sound player (ezflix225.dsp, 22.5 kHz): its
+    // sound format isn't known yet, so it plays silently, at its pace, so that
+    // its cues (which pace the movie) still come.
+    if (has(n, "ezflix")) { *fixed = true; *half = true; return Kind::Sampler; }
     if (has(n, "envelope")) return Kind::Envelope;
     if (has(n, "saw") || has(n, "triangle") || has(n, "pulse") || has(n, "square") || has(n, "noise") ||
         has(n, "sine") || has(n, "osc"))
@@ -78,6 +82,7 @@ void Audio::add_instrument(int32_t item, const std::string& tmpl_name) {
     Instrument in;
     in.tmpl = base_name(tmpl_name);
     in.kind = classify(tmpl_name, &in.fixed_rate, &in.half_rate, &in.stereo, &in.inputs);
+    in.silent = has(base_name(tmpl_name), "ezflix");
     if (in.kind == Kind::Sampler) {
         const std::string& n = in.tmpl;
         if (has(n, "duck")) {             // movie sound: fixed 22050 or 44100 Hz stereo
@@ -325,7 +330,12 @@ void Audio::attachment_ended(int32_t id, Attachment& a, Instrument& in) {
 // One output frame from one attachment. Returns false when nothing played.
 bool Audio::sampler_frame(Instrument& in, Attachment& a, float& l, float& r) {
     const Sample* orig = sample(a.sample);
-    if (!orig || !orig->addr) return false;
+    if (!orig) return false;
+    // A sample with no sound (no address or no length, as a streaming
+    // player's buffer between fills) plays nothing and its attachment ends at
+    // once, firing its cue and starting the linked one, as on the DSP. Waiting
+    // here stalled Twisted's opening stream.
+    if (!orig->addr || !orig->bytes) { if (!std::getenv("TDORT_OLD_EMPTY")) a.ended_flag = true; return false; }
     Sample eff;
     const Sample* s = orig;
     if (in.data_bits || in.data_sdx2 || in.data_adp4 || in.data_duck) {   // the instrument decides the format
@@ -362,7 +372,7 @@ bool Audio::sampler_frame(Instrument& in, Attachment& a, float& l, float& r) {
         if (eff.rel_end > int64_t(eff.frames)) eff.rel_end = -1;
         s = &eff;
     }
-    if (!s->frames) return false;
+    if (!s->frames) { if (!std::getenv("TDORT_OLD_EMPTY")) a.ended_flag = true; return false; }
     double step;
     if (in.fixed_rate) step = in.half_rate ? 0.5 : 1.0;
     else if (in.pitch_step >= 0) step = in.pitch_step;
@@ -478,7 +488,7 @@ void Audio::eval(int32_t id, Instrument& in) {
                 if (!a.active || a.envelope) continue;
                 if (!sampler_frame(in, a, l, r) && a.ended_flag) { a.ended_flag = false; attachment_ended(aid, a, in); }
             }
-            const float amp = std::clamp(knob(in, "Amplitude", 0x7FFF), 0, 0x7FFF) / 32767.0f * envelope_gain(in);
+            const float amp = in.silent ? 0.0f : std::clamp(knob(in, "Amplitude", 0x7FFF), 0, 0x7FFF) / 32767.0f * envelope_gain(in);
             l *= amp; r *= amp;
             if (in.data_duck) {
                 // Movie sound never resets its sample values, so any seam in the

@@ -27,6 +27,8 @@ struct Cpu {
     uint64_t cycles = 0;
     bool     halted = false;
 
+    uint32_t mod_base = 0;   // load address of the module whose translated block is running
+
     Memory*  mem = nullptr;
     Runtime* rt  = nullptr;
 

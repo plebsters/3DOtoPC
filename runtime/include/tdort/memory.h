@@ -40,17 +40,26 @@ struct Memory {
     std::vector<uint8_t> ram;                 // DRAM + VRAM, kRamEnd bytes
     std::vector<uint8_t> code_granule;        // 1 = granule holds recompiled code
     std::vector<uint8_t> granule_dirty;       // 1 = recompiled code here was overwritten
+    // Who overwrote it (diagnosis): the guest pc, or 0xFFFFFFFF and the name
+    // of the OS call that was running (a disc read, memset, ...).
+    std::vector<uint32_t> dirty_by;
+    std::vector<const char*> dirty_call;
+    const char* host_call = nullptr;          // set by the runtime around each OS call
     IoRead  io_read  = nullptr;
     IoWrite io_write = nullptr;
     void*   io_user  = nullptr;
 
-    Memory() : ram(kRamEnd, 0), code_granule(kGranuleCount, 0), granule_dirty(kGranuleCount, 0) {}
+    Memory() : ram(kRamEnd, 0), code_granule(kGranuleCount, 0), granule_dirty(kGranuleCount, 0),
+               dirty_by(kGranuleCount, 0), dirty_call(kGranuleCount, nullptr) {}
 
     void invalidate(uint32_t addr, uint32_t len) {
         if (addr >= kRamEnd || len == 0) return;
         uint32_t end = addr + len > kRamEnd ? kRamEnd : addr + len;
         for (uint32_t g = addr >> kGranuleShift; g <= (end - 1) >> kGranuleShift; ++g)
-            if (code_granule[g]) granule_dirty[g] = 1;
+            if (code_granule[g] && !granule_dirty[g]) { granule_dirty[g] = 1; dirty_by[g] = 0xFFFFFFFFu; dirty_call[g] = host_call; }
+    }
+    void mark_cpu_write(uint32_t g, uint32_t pc) {
+        if (!granule_dirty[g]) { granule_dirty[g] = 1; dirty_by[g] = pc; dirty_call[g] = nullptr; }
     }
     // Host-side bulk copy into guest memory (file loads, DMA). Invalidates code.
     void write_block(uint32_t addr, const void* src, uint32_t len) {
@@ -86,7 +95,7 @@ TDORT_FORCEINLINE void mem_w32(Cpu* c, uint32_t addr, uint32_t v) {
     if (addr < kRamEnd) {
         store_be32(&m->ram[addr], v);
         uint32_t g = addr >> kGranuleShift;
-        if (m->code_granule[g]) m->granule_dirty[g] = 1;
+        if (m->code_granule[g]) m->mark_cpu_write(g, c->r[15]);
         return;
     }
     if (m->io_write) m->io_write(m->io_user, addr, v, 4);
@@ -96,7 +105,7 @@ TDORT_FORCEINLINE void mem_w8(Cpu* c, uint32_t addr, uint8_t v) {
     if (addr < kRamEnd) {
         m->ram[addr] = v;
         uint32_t g = addr >> kGranuleShift;
-        if (m->code_granule[g]) m->granule_dirty[g] = 1;
+        if (m->code_granule[g]) m->mark_cpu_write(g, c->r[15]);
         return;
     }
     if (m->io_write) m->io_write(m->io_user, addr, v, 1);

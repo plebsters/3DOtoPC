@@ -1,6 +1,7 @@
 /* audio.c - exercises the audio folio from compiled C: instruments, a mixer,
  * knobs, a sample made in memory, an AIFF parsed from memory, a cue at the
- * end of an attachment, linked attachments and item info.
+ * end of an attachment, linked attachments, item info, a sample made from an
+ * AIFF image in place, template attachments and Adopt/AbandonInstrument.
  * Exit 0x5A = all passed, else a bitmask of failed checks. */
 #include "pf.h"
 
@@ -27,6 +28,11 @@ static void** ab;   /* audio folio base */
 #define AttachSample(i, s, f)     ((Item (*)(Item, Item, const char*))ab[-36])(i, s, f)
 #define GetAudioItemInfo(i, t)    ((s32 (*)(Item, TagArg*))ab[-9])(i, t)
 #define GetCueSignal(c)           ((u32 (*)(Item))ab[-18])(c)
+#define CreateSample(t)           ((Item (*)(TagArg*))ab[-44])(t)
+#define LoadInsTemplate(n, d)     ((Item (*)(const char*, Item))ab[-1])(n, d)
+#define CreateInstrument(t, tags) ((Item (*)(Item, TagArg*))ab[-47])(t, tags)
+SWI_FN(s32, AbandonInstrument,  0x40018, (Item ins))
+SWI_FN(Item, AdoptInstrument,   0x40019, (Item tmpl))
 
 static u8 aiff[] = {
     'F','O','R','M', 0,0,0,46+200, 'A','I','F','F',
@@ -88,5 +94,26 @@ int main(void) {
     got = WaitSignal(sig2);
     CHECK(9, (got & sig2) != 0);
     StopInstrument(ins, 0);
+
+    /* 10: CreateSample from an AIFF image in memory, left in place */
+    TagArg ct[4] = {{63 /*IMAGE_ADDRESS*/, (u32)aiff_image}, {64 /*IMAGE_LENGTH*/, sizeof aiff_image}, {65 /*LEAVE_IN_PLACE*/, 1}, {0, 0}};
+    Item smp3 = CreateSample(ct);
+    TagArg info3[3] = {{36 /*ADDRESS*/, 0}, {24 /*FRAMES*/, 0}, {0, 0}};
+    GetAudioItemInfo(smp3, info3);
+    CHECK(10, smp3 > 0 && info3[0].arg == (u32)aiff_image + sizeof aiff && info3[1].arg == 100);
+
+    /* 11: a sample attached to a template comes with instruments made from it */
+    Item tmpl = LoadInsTemplate("sampler.dsp", 0);
+    TagArg at[3] = {{16 /*TEMPLATE*/, (u32)tmpl}, {37 /*SAMPLE*/, (u32)smp3}, {0, 0}};
+    Item tatt = CreateSizedItem(NODE_ID(4, 7), at, 0);
+    Item ins2 = CreateInstrument(tmpl, 0);
+    CHECK(11, tmpl > 0 && tatt > 0 && ins2 > 0);
+
+    /* 12: AdoptInstrument gives back only an abandoned instrument of that template */
+    Item none = AdoptInstrument(tmpl);
+    AbandonInstrument(ins2);
+    Item back = AdoptInstrument(tmpl);
+    Item again = AdoptInstrument(tmpl);
+    CHECK(12, none == 0 && back == ins2 && again == 0);
     return fails ? (int)fails : 0x5A;
 }

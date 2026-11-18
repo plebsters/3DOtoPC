@@ -147,10 +147,24 @@ void Portfolio::task_exit(HleTask& t, const char* why) {
         if (s) free_mem(s);
         t.owned_stack = 0;
     }
+    if (t.program && t.image_hi) rt.unmap_modules(t.image_lo, t.image_hi);
     if (t.program) delete_task_items(t);
     if (t.program) free_task_memory(t.item);   // a loaded program: all it owned (threads belong to their owner)
     if (HleItem* it = item(t.item)) it->alive = false;
-    if (t.parent && task_by_item(t.parent)) raise_signal(t.parent, 0x10 /*SIGF_DEADTASK*/);
+    // The creator learns that its child (program or thread) has gone, as the
+    // kernel does: by the exit message it asked for, else SIGF_DEADTASK.
+    // (Threads used to send nothing; Cyberia's movie player waits for its
+    // streaming threads this way and hung after the intro.)
+    if (t.parent && task_by_item(t.parent)) {
+        HleItem* m = t.exit_msg ? item(t.exit_msg) : nullptr;
+        HleItem* port = m ? item(m->reply_port) : nullptr;
+        if (m && port) {
+            w32(m->addr + message::Result, uint32_t(t.exit_status));
+            w32(m->addr + message::DataPtr, uint32_t(t.item));
+            w32(m->addr + message::DataSize, uint32_t(cur().item));
+            send_message(*port, *m);
+        } else raise_signal(t.parent, 0x10 /*SIGF_DEADTASK*/);
+    }
     if (HleItem* it = item(t.item)) node_remove(it->addr);
     mt = live_tasks() > 1;
     if (&t == &cur()) {
@@ -229,6 +243,7 @@ void Portfolio::preempt() {
 
 int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t pri) {
     uint32_t pc = 0, stack_size = 0, argc = 0, argp = 0, sp = 0, base = c.r[9], owned_stack = 0;
+    int32_t exit_msg = 0;
     bool has_pc = false;
     each_tag(tags, [&](uint32_t t, uint32_t a) {
         switch (t) {
@@ -239,6 +254,7 @@ int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t p
         case kTagTaskSp: sp = a; break;
         case kTagTaskBase: base = a; break;
         case kTagTaskAllocdThreadSp: owned_stack = a; break;
+        case 25 /* CREATETASK_TAG_MSGFROMCHILD */: exit_msg = int32_t(a); break;
         default: break;
         }
     });
@@ -248,9 +264,15 @@ int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t p
     }
     if (!stack_size) stack_size = 4096;
     if (!sp) {
-        uint32_t stack = alloc(stack_size, kMemFromTop);   // keep OS memory out of the game's heap
-        owned_stack = stack;
-        if (!stack) return kErrNoMem;
+        // Room below the stack: the real kernel grows a thread's stack into
+        // free memory beneath it when the thread runs past its limit
+        // (Super Street Fighter II Turbo starts a thread with 256 bytes).
+        const uint32_t reserve = stack_size < 2048 ? 8192 - stack_size : 0;   // only for very small stacks
+        uint32_t block = alloc(stack_size + reserve, kMemFromTop);   // keep OS memory out of the game's heap
+        uint32_t stack = block + reserve;
+        if (!block) { block = alloc(stack_size, kMemFromTop); stack = block; }
+        if (!block) return kErrNoMem;
+        owned_stack = block;
         sp = stack + stack_size;
     }
     HleItem& it = new_item(ItemKind::Task, kSubsysKernel, kNodeTask, task::Size, name);
@@ -273,9 +295,11 @@ int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t p
     HleTask t;
     t.item = it.num; t.addr = it.addr; t.pri = pri; t.name = name;
     t.owned_stack = owned_stack;
+    t.parent = cur().item;           // the creator gets SIGF_DEADTASK (or exit_msg) when this ends
+    t.exit_msg = exit_msg;
     t.r[0] = argc; t.r[1] = argp;
     t.r[9] = base;
-    t.r[10] = stack_lo + 256;          // APCS stack limit
+    t.r[10] = stack_lo + 128;          // APCS stack limit, as the kernel sets it
     t.r[13] = sp & ~3u;
     t.r[14] = thread_exit_trap_;       // returning from the thread function ends it
     t.r[15] = pc & ~3u;
@@ -352,8 +376,11 @@ int32_t Portfolio::start_program(const std::string& cmdline, const std::string& 
     for (uint32_t a : {base, argv, stack}) if (allocs_.count(a)) alloc_owner_[a] = it.num;
     for (size_t k = 0; k < args.size(); ++k) if (uint32_t sa = r32(argv + uint32_t(4 * k))) if (allocs_.count(sa)) alloc_owner_[sa] = it.num;
     mt = true;
-    rt.log("program \"%s\" loaded at %08X-%08X (%u bytes, entry %08X), task item %d, pri %u, interpreted",
-           cmdline.c_str(), base, base + uint32_t(need), img.file_size, base + (img.entry - img.image_base), it.num, pri);
+    const bool translated = rt.map_module(fnv1a64_hex(file), base, img.load_size(), base + (img.entry - img.image_base), name);
+    tasks_.back().image_lo = base; tasks_.back().image_hi = base + uint32_t(need);
+    rt.log("program \"%s\" loaded at %08X-%08X (%u bytes, entry %08X), task item %d, pri %u, %s",
+           cmdline.c_str(), base, base + uint32_t(need), img.file_size, base + (img.entry - img.image_base), it.num, pri,
+           translated ? "translated" : "interpreted (not translated by the converter)");
     return it.num;
 }
 

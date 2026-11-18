@@ -88,7 +88,7 @@ constexpr uint32_t kTagEnd = 0, kTagJump = 254, kTagNop = 255;
 constexpr uint32_t kTagItemName = 1, kTagItemPri = 2;
 constexpr uint32_t kTagIOReqReplyPort = 10, kTagIOReqDevice = 11;
 constexpr uint32_t kTagPortSignal = 10;
-constexpr uint32_t kTagMsgReplyPort = 10;
+constexpr uint32_t kTagMsgReplyPort = 10, kTagMsgDataSize = 12;   // CREATEMSG_TAG_REPLYPORT, _DATA_SIZE
 // CreateScreenGroup tags
 constexpr uint32_t kCsgDisplayHeight = 1, kCsgScreenCount = 2, kCsgScreenHeight = 3,
                    kCsgBitmapCount = 4, kCsgBitmapWidthArray = 5, kCsgBitmapHeightArray = 6,

@@ -77,6 +77,11 @@ int32_t Portfolio::display_screen(int32_t s0, int32_t /*s1: odd field, same imag
     // A display list set with SetVDL decides which memory the screen shows.
     if (auto v = screen_vdl_buffer_.find(s0); v != screen_vdl_buffer_.end()) rt.gfx->set_display_buffer(v->second);
     else if (HleItem* bm = item(scr->children[0])) rt.gfx->set_display_buffer(r32(bm->addr + bitmap::Buffer));
+    if (std::getenv("TDORT_DEBUG_DISPLAY")) {
+        HleItem* bm = item(scr->children[0]);
+        rt.log("DisplayScreen(%d): showing %08X (bitmap %d buffer %08X)", s0, rt.gfx->display_buffer(),
+               bm ? bm->num : 0, bm ? r32(bm->addr + bitmap::Buffer) : 0);
+    }
     rt.request_vblank_wait();
     return 0;
 }
@@ -96,6 +101,7 @@ int32_t Portfolio::draw_cels(int32_t bitmap_item, uint32_t ccb) {
     if (t.height <= 0 || t.height > 960) t.height = 240;
     if (t.clip_w <= 0) t.clip_w = t.width;
     if (t.clip_h <= 0) t.clip_h = t.height;
+    if (std::getenv("TDORT_DEBUG_DISPLAY")) rt.log("DrawCels(bitmap %d -> buffer %08X, ccb %08X)", bitmap_item, t.buffer, ccb);
     rt.gfx->draw_cels(t, ccb);
     return 0;
 }
@@ -413,7 +419,23 @@ void Portfolio::audio_sleep_until(uint32_t ticks) {
     c.r[0] = 0;
     const uint32_t now = audio_ticks();
     if (std::getenv("TDORT_SLEEP_TRACE")) rt.log("sleep-until %u now %u (%+d)", ticks, now, int32_t(ticks - now));
-    if (int32_t(ticks - now) <= 0) return;
+    // A time already past still waits: the folio posts the cue and it fires
+    // at the next audio-timer interrupt, so the task yields meanwhile.
+    // (Super Street Fighter II Turbo's music thread, the highest priority,
+    // sleeps until a fixed time in a loop; returning at once starved the game.)
+    // Here the audio clock moves once per frame (4 of its ticks at 240 Hz), so
+    // a task may pass a time already gone up to 4 times in a frame, as it
+    // would wait for 4 timer interrupts; after that it waits for the next
+    // frame. (Slam 'n Jam's music thread catches up this way.)
+    if (int32_t(ticks - now) <= 0) {
+        if (multitasking() && !std::getenv("TDORT_OLD_SLEEP")) {
+            HleTask& t = cur();
+            if (t.past_sleep_frame != frame_no_) { t.past_sleep_frame = frame_no_; t.past_sleeps = 0; }
+            const uint32_t per_frame = std::max<uint32_t>(1, uint32_t((uint64_t(audio_rate_) + (30u << 16)) / (60u << 16)));
+            if (++t.past_sleeps > per_frame) sleep_until(frame_no_ + 1);
+        }
+        return;
+    }
     const uint32_t frames = uint32_t((uint64_t(ticks - now) * (60ull << 16) + audio_rate_ - 1) / audio_rate_);
     if (multitasking()) sleep_until(frame_no_ + frames);
     else rt.request_vblank_wait();

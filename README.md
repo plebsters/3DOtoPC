@@ -295,6 +295,8 @@ Environment variables:
 | `TDORT_CPI=2` | cycles per instruction (default 1); higher gives games less CPU per frame |
 | `TDORT_OLD_IO=1` | old I/O behaviour (timer `SendIO` sleeps the caller, `WaitIO` returns at once), as a fallback |
 | `TDORT_DEBUG_IO=1` | log deferred I/O completions and `AbortIO` |
+| `TDORT_OLD_BITMAP=1` | `CreateItem` of a bitmap makes a bare item, as before (fallback) |
+| `TDORT_DEBUG_DISPLAY=1` | log `DisplayScreen` and `DrawCels` targets |
 | `TDORT_DUMP_API=api.tsv` | write the table of implemented OS calls (for `api_coverage.py`) |
 
 ## Status
@@ -326,7 +328,8 @@ numbers.
 * **File folio:** files, directories, streams (`OpenDiskStream`), aliases, NVRAM saves,
   `LoadProgram`, code modules (`LoadCode`, `ExecuteAsSubroutine`, `ExecuteAsThread`,
   `UnloadCode`), multi-disc lookup.
-* **Graphics folio:** screen groups, bitmaps, `DisplayScreen`, VDLs (basic), cel drawing,
+* **Graphics folio:** screen groups, bitmaps (also `CreateItem` of a bitmap over the game's
+  own buffer), `DisplayScreen`, VDLs (basic), cel drawing,
   `MapCel`, pens, `MoveTo`/`DrawTo` lines, `FillRect`, `WritePixel`/`ReadPixel`, text with
   a built-in 8x8 font (`DrawText8`/`DrawText16`/`DrawChar`), `QueryGraphics`.
 * **Event broker:** controller events, focus, pod descriptions; a listener that isn't
@@ -351,13 +354,17 @@ controller input from keyboard and Xbox pad, NVRAM saves, debug console, crash r
 
 **Milestone 4 (done): real games.** Compatibility is tracked in the "3DO to PC —
 Compatibility Status" sheet. Playable: Real Pinball, Slam 'n Jam '95, Gex, Burning Soldier,
-Crash 'n Burn, Demolition Man, John Madden Football. Partly working: Brain Dead 13 (video
+Crash 'n Burn, Demolition Man, John Madden Football, FIFA International Soccer. Partly working: Brain Dead 13 (video
 scenes play), Creature Shock (intro plays), Doom (reaches E1M1), Captain Quazar, Escape from
 Monster Manor, Alone in the Dark, Jurassic Park Interactive, Another World, Ballz, Cannon
 Fodder, Hell, Cyberia (reaches the name entry), Dragon Lore (intro with sound and the main
 menu).
 
 Fixes found by running games (each a difference from the real OS):
+* FIFA International Soccer: its movie player makes a bitmap with `CreateItem` (width,
+  height, buffer tags) and decodes the Cinepak frames into `bm_Buffer`. The runtime made a
+  bare item with no bitmap fields, so the frames went to address 0 and the screen stayed
+  blank. The intro movies now play and the game reaches a full match.
 * Super Street Fighter II Turbo: its music thread (the highest priority) sleeps with
   `SleepUntilTime` until a time already past, in a loop. The folio still waits for the next
   audio-timer tick there; the runtime returned at once, so no other thread ever ran. Now a
@@ -417,7 +424,8 @@ against the local game builds before release.
 
 **Not done yet:**
 * Sound DSP effects (reverb, filters, echo) pass the sound through unchanged.
-* Cinepak and the 3DO streaming-movie library are untested.
+* Some games with their own streaming code still stall (Twisted waits for an event that
+  never arrives after its opening stream).
 * Light gun, mouse and two-player input are untested.
 * CPU timing counts one cycle per instruction and drawing costs no CPU time, so games that
   run as fast as the CPU allows can run faster than on a console (`TDORT_CPI` adjusts it).

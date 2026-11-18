@@ -23,12 +23,30 @@ struct RecompEntry {
     BlockFn  fn;
 };
 
+// A block of another program on the disc, translated relative to where that
+// program is loaded (see ModuleInfo).
+struct ModuleEntry {
+    uint32_t offset;             // from the program's load address
+    uint32_t byte_len;
+    uint32_t check;              // fnv1a-32 of the block's instruction words
+    BlockFn  fn;                 // runs with Cpu::mod_base = load address
+};
+struct ModuleInfo {
+    const char* name;            // path on the disc
+    const char* file_hash;       // fnv1a64 hex of the file
+    uint32_t    entry_offset;    // the entry point (after the AIF header has relocated the image)
+    uint32_t    count;
+    const ModuleEntry* entries;
+};
+
 // Symbols provided by the generated code of each converted game.
 extern "C" const RecompEntry tdort_recomp_table[];
 extern "C" const uint32_t    tdort_recomp_count;
 extern "C" const char        tdort_image_hash[];     // fnv1a64 hex of the LaunchMe image
 extern "C" const char        tdort_game_name[];
 extern "C" const uint32_t    tdort_image_base;
+extern "C" const ModuleInfo  tdort_modules[];
+extern "C" const uint32_t    tdort_module_count;
 
 // Host side of an HLE call. Arguments in r0-r3 (+stack), result in r0.
 using HleFn = std::function<void(Cpu*)>;
@@ -109,6 +127,24 @@ private:
     void crash(const char* reason, uint32_t pc);
 
     std::vector<int32_t> lookup_;            // guest word index -> recomp table index, -1 = none
+
+    // Translated programs loaded at run time (LoadProgram, LoadCode).
+    struct LoadedModule {
+        const ModuleInfo* info = nullptr;
+        uint32_t base = 0, size = 0, entry_pc = 0;
+        bool active = false;                 // checked and mapped (at its entry point)
+        std::vector<int32_t> lookup;         // (pc - base) / 4 -> entry index, -1 = none
+        std::string name;
+    };
+    std::vector<LoadedModule> modules_;
+public:
+    // A program file was loaded at `base`: if the converter translated it,
+    // its blocks run natively once it reaches its entry point.
+    bool map_module(const std::string& file_hash, uint32_t base, uint32_t size, uint32_t entry_pc, const std::string& name);
+    void unmap_modules(uint32_t lo, uint32_t hi);    // that memory was freed
+private:
+    void activate_module(LoadedModule& m);
+    bool run_module_block(uint32_t pc);
     std::unordered_map<uint32_t, HleEntry> swis_;
     std::vector<HleEntry> traps_;
     std::unordered_set<uint32_t> unknown_swis_, interp_hits_;

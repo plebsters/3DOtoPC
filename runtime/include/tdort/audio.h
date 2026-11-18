@@ -69,6 +69,7 @@ public:
         std::string tmpl;
         Kind     kind = Kind::Effect;
         bool     fixed_rate = false, half_rate = false, stereo = false;
+        bool     silent = false;          // a player whose sound format isn't decoded (EZFlix)
         int32_t  freq_unit = 0x4000;      // Frequency knob value for normal speed (0x8000 on var* players)
         // The DSP program decides how sample data is read: "...8" players read
         // 8-bit PCM, "...16" 16-bit, the dcsqxd players SDX2, adpcm ADP4.

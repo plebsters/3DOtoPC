@@ -9,6 +9,7 @@ add_library(tdort STATIC
     src/hle_compress.cpp
     src/hle_jstring.cpp
     src/hle_report.cpp
+    src/modules_default.cpp
     src/hle_input.cpp
     src/hle_tasks.cpp
     src/gfx.cpp
