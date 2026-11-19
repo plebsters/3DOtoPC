@@ -13,6 +13,7 @@
 #
 # Options:  -Frames 5400       game frames per test (60 per second of game time)
 #           -TimeoutMinutes 15 stop a test that takes longer than this
+#           -ConvertTimeoutMinutes 60  stop a conversion that takes longer than this
 #           -Rerun             test games again even if they have results
 #           -Only "Gex*"       only games whose name matches this pattern
 #           -NoPause           do not wait for Enter at the end
@@ -21,6 +22,7 @@ param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)][string[]]$Inputs,
     [int]$Frames = 5400,
     [int]$TimeoutMinutes = 15,
+    [int]$ConvertTimeoutMinutes = 60,
     [switch]$Rerun,
     [string]$Only = '*',
     [switch]$NoPause
@@ -256,10 +258,31 @@ foreach ($job in $jobs) {
     $hints = Join-Path $out 'interp_hits.txt'
     if (Test-Path $hints) { $convArgs += @('--hints', $hints) }
     $convLog = Join-Path $out 'convert.log'
-    Write-Host 'Converting (a few minutes)...'
-    & $converter @convArgs *> $convLog
+    Write-Host "Converting (a few minutes; stopped after $ConvertTimeoutMinutes)..."
+    # Run the converter as its own process so a conversion that hangs can be
+    # stopped (with the compiler processes it started) and the batch goes on.
+    $quoted = ($convArgs | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
+    $convErr = "$convLog.err"
+    $cp = Start-Process -FilePath $converter -ArgumentList $quoted -PassThru -NoNewWindow `
+                        -RedirectStandardOutput $convLog -RedirectStandardError $convErr
+    $null = $cp.Handle
+    $convDone = $cp.WaitForExit($ConvertTimeoutMinutes * 60 * 1000)
+    if (-not $convDone) {
+        & taskkill.exe /PID $cp.Id /T /F *> $null
+        Start-Sleep -Seconds 2
+    }
+    if (Test-Path -LiteralPath $convErr) {
+        Get-Content -LiteralPath $convErr -ErrorAction SilentlyContinue | Add-Content -LiteralPath $convLog
+        Remove-Item -LiteralPath $convErr -ErrorAction SilentlyContinue
+    }
+    $convCode = if ($convDone) { $cp.ExitCode } else { -1 }
     $exe = Join-Path $out "$name.exe"
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
+    if (-not $convDone) {
+        $res.Status = 'Conversion timed out'
+        $last = (Get-Content -LiteralPath $convLog -ErrorAction SilentlyContinue | Select-Object -Last 1) -as [string]
+        $res.Detail = "Still converting after $ConvertTimeoutMinutes minutes; last step: $last"
+        Copy-Item -LiteralPath $convLog -Destination $resDir -ErrorAction SilentlyContinue
+    } elseif ($convCode -ne 0 -or -not (Test-Path $exe)) {
         $res.Status = 'Conversion failed'
         $res.Detail = ((Get-Content -LiteralPath $convLog -ErrorAction SilentlyContinue |
                         Where-Object { $_ -match 'error|fail' } | Select-Object -First 1) -as [string])

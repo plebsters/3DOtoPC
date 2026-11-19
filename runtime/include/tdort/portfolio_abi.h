@@ -197,7 +197,7 @@ constexpr uint32_t ByteCount = 0, SystemID = 4, TimeStamp = 8, Submitter = 12, E
 constexpr int32_t kErrBadItem = int32_t(0x81010101), kErrNoMem = int32_t(0x81010102),
                   kErrNotFound = int32_t(0x81010103),
                   // the file folio's "no such file" (MakeFErr(..., ER_Fs_NoFile)); games compare with it
-                  kErrFsNoFile = int32_t(0xD556F101), kErrBadPtr = int32_t(0x81010104),
+                  kErrFsNoFile = int32_t(0xD556F101), kErrGrafBadClip = int32_t(0xD55B9115), kErrBadPtr = int32_t(0x81010104),
                   kErrNotSupported = int32_t(0x81010105), kErrBadCommand = int32_t(0x81010106),
                   kErrNoSignals = int32_t(0x81010107), kErrEof = int32_t(0x81010108);
 

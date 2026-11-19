@@ -44,10 +44,17 @@ struct ModuleSource {
     Analysis analysis;
 };
 
-// Writes recomp_*.cpp, mod*_*.cpp and recomp_table.cpp into out_dir. Returns file list.
+struct EmitStats {
+    uint32_t module_blocks = 0;          // blocks in all the other programs
+    uint32_t module_unique = 0;          // of those, different ones (each compiled once)
+};
+
+// Writes recomp_*.cpp, mods_*.cpp, modtab_*.cpp and recomp_table.cpp into
+// out_dir. Returns file list.
 std::vector<std::string> emit_cpp(const tdort::AifImage& img, const Analysis& a,
                                   const EmitOptions& opt, const std::string& out_dir,
-                                  const std::vector<ModuleSource>& modules = {});
+                                  const std::vector<ModuleSource>& modules = {},
+                                  EmitStats* stats = nullptr);
 
 // Writes a listing (disassembly with block markers) for inspection.
 void write_listing(const tdort::AifImage& img, const Analysis& a, const std::string& path);

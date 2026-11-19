@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstdlib>
 // hle_graphics.cpp - Graphics folio replacement (screen groups, display,
 // CEL entry points) plus the other folios games open at start-up.
@@ -102,6 +103,10 @@ int32_t Portfolio::draw_cels(int32_t bitmap_item, uint32_t ccb) {
     if (t.clip_w <= 0) t.clip_w = t.width;
     if (t.clip_h <= 0) t.clip_h = t.height;
     if (std::getenv("TDORT_DEBUG_DISPLAY")) rt.log("DrawCels(bitmap %d -> buffer %08X, ccb %08X)", bitmap_item, t.buffer, ccb);
+    static const bool cel_trace = std::getenv("TDORT_CEL_TRACE") != nullptr;
+    if (cel_trace)
+        std::fprintf(stderr, "DrawCels bitmap %d buffer %08X %dx%d clip %d,%d %dx%d (frame %u)\n", bitmap_item, t.buffer,
+                     t.width, t.height, t.clip_x, t.clip_y, t.clip_w, t.clip_h, frame_no_);
     const uint64_t px0 = rt.gfx->pixels_written, cels0 = rt.gfx->cels_drawn;
     rt.gfx->draw_cels(t, ccb);
     // DrawCels waits for the cel engine, and the engine holds the memory bus
@@ -215,31 +220,52 @@ void Portfolio::install_graphics() {
     };
     // The clip window of a bitmap. Its origin is also where cel coordinates
     // start: a 3D view sets it to the screen's centre and draws around (0,0)
-    // (Escape from Monster Manor's walls).
+    // (Escape from Monster Manor's walls). As in the graphics folio, a window
+    // that would not fit inside the bitmap is refused with GRAFERR_BADCLIP and
+    // nothing changes: Wolfenstein 3D calls SetClipWidth(bitmap, 0), which the
+    // console ignores; clamping it to 1 pixel hid its whole 3D view.
+    // TDORT_OLD_CLIP=1 brings back the old clamping.
+    static const bool old_clip = std::getenv("TDORT_OLD_CLIP") != nullptr;
     v[gvSetClipOrigin]     = [this](Cpu*) {                // SetClipOrigin(bitmap, x, y)
         HleItem* bm = item(int32_t(arg(0)));
+        if (std::getenv("TDORT_CEL_TRACE")) std::fprintf(stderr, "SetClipOrigin(bitmap %d, x %d, y %d)\n", int32_t(arg(0)), int32_t(arg(1)), int32_t(arg(2)));
         if (!bm || bm->kind != ItemKind::Bitmap) { c.r[0] = uint32_t(kErrBadItem); return; }
         const int32_t w = int32_t(r32(bm->addr + bitmap::Width)), h = int32_t(r32(bm->addr + bitmap::Height));
-        const int32_t x = int32_t(arg(1)), y = int32_t(arg(2));
-        if (x < 0 || y < 0 || x >= w || y >= h) { c.r[0] = uint32_t(kErrBadPtr); return; }
+        const int32_t cw = int32_t(r32(bm->addr + bitmap::ClipWidth)), ch = int32_t(r32(bm->addr + bitmap::ClipHeight));
+        int32_t x = int32_t(arg(1)), y = int32_t(arg(2));
+        if (old_clip) {
+            if (x < 0 || y < 0 || x >= w || y >= h) { c.r[0] = uint32_t(kErrBadPtr); return; }
+            w32(bm->addr + bitmap::ClipX, uint32_t(x)); w32(bm->addr + bitmap::ClipY, uint32_t(y));
+            if (cw > w - x) w32(bm->addr + bitmap::ClipWidth, uint32_t(w - x));
+            if (ch > h - y) w32(bm->addr + bitmap::ClipHeight, uint32_t(h - y));
+            c.r[0] = 0;
+            return;
+        }
+        y &= ~1;                                           // the folio rounds Y down to an even line
+        if (x < 0 || x + cw > w || y < 0 || y + ch > h) { c.r[0] = uint32_t(kErrGrafBadClip); return; }
         w32(bm->addr + bitmap::ClipX, uint32_t(x)); w32(bm->addr + bitmap::ClipY, uint32_t(y));
-        // keep the window inside the bitmap
-        if (int32_t(r32(bm->addr + bitmap::ClipWidth)) > w - x) w32(bm->addr + bitmap::ClipWidth, uint32_t(w - x));
-        if (int32_t(r32(bm->addr + bitmap::ClipHeight)) > h - y) w32(bm->addr + bitmap::ClipHeight, uint32_t(h - y));
         c.r[0] = 0;
     };
     v[gvSetClipWidth]      = [this](Cpu*) {                // SetClipWidth(bitmap, width)
         HleItem* bm = item(int32_t(arg(0)));
+        if (std::getenv("TDORT_CEL_TRACE")) std::fprintf(stderr, "SetClipWidth(bitmap %d, %d) from %08X\n", int32_t(arg(0)), int32_t(arg(1)), c.r[14]);
         if (!bm || bm->kind != ItemKind::Bitmap) { c.r[0] = uint32_t(kErrBadItem); return; }
-        const int32_t w = int32_t(r32(bm->addr + bitmap::Width)) - int32_t(r32(bm->addr + bitmap::ClipX));
-        w32(bm->addr + bitmap::ClipWidth, uint32_t(std::clamp<int32_t>(int32_t(arg(1)), 1, std::max(1, w))));
+        const int32_t room = int32_t(r32(bm->addr + bitmap::Width)) - int32_t(r32(bm->addr + bitmap::ClipX));
+        const int32_t v = int32_t(arg(1));
+        if (old_clip) { w32(bm->addr + bitmap::ClipWidth, uint32_t(std::clamp<int32_t>(v, 1, std::max(1, room)))); c.r[0] = 0; return; }
+        if (v <= 0 || v > room) { c.r[0] = uint32_t(kErrGrafBadClip); return; }
+        w32(bm->addr + bitmap::ClipWidth, uint32_t(v));
         c.r[0] = 0;
     };
     v[gvSetClipHeight]     = [this](Cpu*) {                // SetClipHeight(bitmap, height)
         HleItem* bm = item(int32_t(arg(0)));
+        if (std::getenv("TDORT_CEL_TRACE")) std::fprintf(stderr, "SetClipHeight(bitmap %d, %d)\n", int32_t(arg(0)), int32_t(arg(1)));
         if (!bm || bm->kind != ItemKind::Bitmap) { c.r[0] = uint32_t(kErrBadItem); return; }
-        const int32_t h = int32_t(r32(bm->addr + bitmap::Height)) - int32_t(r32(bm->addr + bitmap::ClipY));
-        w32(bm->addr + bitmap::ClipHeight, uint32_t(std::clamp<int32_t>(int32_t(arg(1)), 1, std::max(1, h))));
+        const int32_t room = int32_t(r32(bm->addr + bitmap::Height)) - int32_t(r32(bm->addr + bitmap::ClipY));
+        const int32_t v = int32_t(arg(1));
+        if (old_clip) { w32(bm->addr + bitmap::ClipHeight, uint32_t(std::clamp<int32_t>(v, 1, std::max(1, room)))); c.r[0] = 0; return; }
+        if (v <= 0 || v > room) { c.r[0] = uint32_t(kErrGrafBadClip); return; }
+        w32(bm->addr + bitmap::ClipHeight, uint32_t(v));
         c.r[0] = 0;
     };
     v[gvDrawCels]          = [this](Cpu*) { c.r[0] = uint32_t(draw_cels(int32_t(arg(0)), arg(1))); };

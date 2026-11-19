@@ -934,7 +934,11 @@ void Portfolio::install_kernel_swis() {
             for (auto& [cue, sig] : cue_signals_) from_audio |= sig;
             for (auto& ts : timed_signals_) if (ts.task == cur().item) from_audio |= ts.mask;
             from_audio &= mask;
-            if (multitasking() || from_input || from_audio) {
+            // An I/O request of this task still in progress will signal it
+            // (SIGF_IODONE or its reply port's signal) when it finishes.
+            bool io_pending = false;
+            for (const VblIo& v : vbl_io_) if (v.task == cur().item) { io_pending = true; break; }
+            if (multitasking() || from_input || from_audio || io_pending) {
                 block_retry();
                 return;
             }
@@ -1129,12 +1133,24 @@ void Portfolio::unqueue(HleItem& msg) {
 
 // WaitPort(port, msg): wait for msg (or any message if msg <= 0) on port.
 // With no port, wait for msg wherever it is going (its reply port).
+// An I/O request still in progress (a disc read waiting for the drive, a
+// timer) that will reply to this port, or with this message.
+bool Portfolio::io_will_reply(int32_t port_num, int32_t msg_num) {
+    for (const VblIo& v : vbl_io_)
+        if (HleItem* ior = item(v.ior)) {
+            if (port_num > 0 && ior->reply_port == port_num) return true;
+            if (msg_num > 0 && ior->msg_item == msg_num) return true;
+        }
+    return false;
+}
+
 void Portfolio::wait_port(int32_t port_num, int32_t want) {
     if (port_num <= 0 && want > 0) {
-        // No port: wait until this message has been replied. Every IO here
-        // completes immediately, so it already has; take it off any port.
+        // No port: wait until this message has been replied, then take it
+        // off whatever port it went to.
         HleItem* m = item(want);
         if (!m) { c.r[0] = uint32_t(kErrBadItem); return; }
+        if (io_will_reply(0, want)) { block_retry(); return; }
         if (HleItem* p = item(m->in_port)) {
             auto& q = p->queue;
             q.erase(std::remove(q.begin(), q.end(), want), q.end());
@@ -1149,7 +1165,10 @@ void Portfolio::wait_port(int32_t port_num, int32_t want) {
     auto& q = port->queue;
     auto it = want > 0 ? std::find(q.begin(), q.end(), want) : q.begin();
     if (it == q.end()) {
-        if (blocking_port(port->num) || multitasking()) { block_retry(); return; }
+        // A disc read still on its way replies here: wait for it, even with
+        // one task (The Coven and Plumbers Don't Wear Ties read their movies
+        // this way and quit with a DataStream error when WaitPort gave up).
+        if (blocking_port(port->num) || multitasking() || io_will_reply(port->num, want)) { block_retry(); return; }
         rt.log("WaitPort(%d \"%s\", %d): nothing queued and no other task can send; returning error",
                port->num, port->name.c_str(), want);
         rt.request_vblank_wait();

@@ -255,6 +255,7 @@ private:
     void    wait_done();                              // a wait completed
     void    park_idle();
     void    wake_tasks();                             // once per frame
+    bool    io_will_reply(int32_t port_num, int32_t msg_num);   // a pending I/O request replies to this port or message
     void    sleep_until(uint32_t frame);              // resume after this SWI, at that frame
     void    task_exit(HleTask& t, const char* why);
     void    raise_signal(int32_t task_item, uint32_t mask);

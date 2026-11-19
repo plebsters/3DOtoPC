@@ -76,7 +76,9 @@ an earlier extract) count as one disc: the batch tester keeps the best copy (`.c
 number (`(Disc 2 of 2)`) makes another disc.
 
 Results: **Running** (still going and drawing at the end), **Screen stuck** (last two
-screenshots identical), **Exited**, **Crashed**, **Timed out**, **Conversion failed**.
+screenshots identical), **Exited**, **Crashed**, **Timed out**, **Conversion failed**,
+**Conversion timed out** (still converting after 60 minutes; `-ConvertTimeoutMinutes 90`
+allows longer).
 
 Games already tested are skipped, so you can close the window and start again later.
 Options (from a PowerShell prompt): `tools\batch-test.ps1 <folder> -Rerun` tests everything
@@ -238,6 +240,13 @@ again, once. The build also uses every CPU core (`--parallel`), with Ninja or th
 Studio generator. Set `TDO_NO_RUNTIME_CACHE=1` to build the runtime with each game as
 before; delete `cache/` to clear it.
 
+Programs the game loads from the disc are translated so they run wherever they land,
+and each block is written relative to its own first instruction. Blocks with the same
+instructions, in one program or several, are compiled once and shared. Samurai Shodown
+has a separate program for every pair of fighters, each carrying the same engine, and
+used to compile the same blocks about 90 times (over 3,600 files). The conversion log
+shows how much was shared ("Other programs: N blocks, M different").
+
 ### Compiler used for converted games (all local)
 1. `toolchain\` next to the app: portable `cmake\`, `ninja\`, `llvm\` (optional `windows-sdk.cmake`). Lets you ship a self-contained app.
 2. Visual Studio / Build Tools, found through `vswhere.exe`.
@@ -324,6 +333,7 @@ Environment variables:
 | `TDORT_AUDIO_STATUS=1` | keep the status line going past 60 s, with the active voices |
 | `TDORT_SPEED_TRACE=1` | every 2 s: how many frames used all the CPU, and the average CPU load |
 | `TDORT_TIMING=old` | old speed model: one clock per instruction and free drawing (games get about twice the CPU) |
+| `TDORT_CEL_TRACE=1` | log every cel drawn, each `DrawCels` target (bitmap, size, clip) and each clip change, to stderr |
 | `TDORT_CEL_CYCLES=0.5` | CPU clocks lost per pixel the cel engine draws (default 0.5; 0 = drawing is free) |
 | `TDORT_N_CLOCKS=2` | clocks per non-sequential memory access (default 2, from the datasheet; 1 = faster memory, games get more CPU) |
 | `TDORT_CPI=2` | divides the clocks per frame (default 1); higher gives games less CPU per frame |
@@ -410,6 +420,17 @@ Fixes found by running games (each a difference from the real OS):
   clears the pending answers, the start ran twice and failed, and the opening was dropped.
   Asynchronous disc reads now take as long as on a 2x CD drive (about 5 KB a frame, one
   request at a time); `TDORT_CD_SPEED=<bytes per frame>` changes it, `0` makes reads instant.
+* Wolfenstein 3D: the game calls `SetClipWidth(bitmap, 0)` before drawing its 3D view. The
+  graphics folio refuses a clip window that doesn't fit the bitmap (`GRAFERR_BADCLIP`) and
+  leaves the clip as it was; the runtime clamped it to 1 pixel, so only the leftmost column
+  of the view was drawn. `SetClipWidth`, `SetClipHeight` and `SetClipOrigin` now accept and
+  refuse exactly what the folio does (`SetClipOrigin` also rounds Y down to an even line).
+  `TDORT_OLD_CLIP=1` brings back the old behaviour.
+* The Coven, Plumbers Don't Wear Ties: with one task, `WaitPort` on an empty port gave up
+  with an error, since nothing could ever send there. Now that disc reads take drive time,
+  the reply to a read still on its way arrives there a few frames later: the games reported
+  "Failure in WaitReadDoneBlockFile" and quit. `WaitPort` and `WaitSignal` now wait while
+  an I/O request of the task is still in progress.
 * Corpse Killer: event broker "button pressed" and "button released" frames carried the whole
   pad, where the console's pad driver puts only the buttons that just went down or came up.
   The game clears held buttons from released frames, so its gun fired on its own and the

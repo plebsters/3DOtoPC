@@ -30,6 +30,7 @@ struct Cpu {
     bool     halted = false;
 
     uint32_t mod_base = 0;   // load address of the module whose translated block is running
+    uint32_t blk_base = 0;   // address of that block's first instruction (module blocks are written relative to it)
 
     Memory*  mem = nullptr;
     Runtime* rt  = nullptr;

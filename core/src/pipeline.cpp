@@ -312,7 +312,11 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
             }
         }
     }
-    auto files = tdo::emit_cpp(img, a, eopt, (out / "src").u8string(), modules);
+    tdo::EmitStats est;
+    auto files = tdo::emit_cpp(img, a, eopt, (out / "src").u8string(), modules, &est);
+    if (est.module_blocks)
+        cx.info("Other programs: " + std::to_string(est.module_blocks) + " blocks, " + std::to_string(est.module_unique) +
+                " different (shared code is compiled once)");
     cx.info(fmt("Generated %zu source files in src/", files.size()));
 
     fs::path runtime = (opt.runtime_dir && *opt.runtime_dir) ? fs::u8path(opt.runtime_dir)

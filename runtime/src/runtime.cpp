@@ -292,6 +292,7 @@ bool Runtime::run_module_block(uint32_t pc) {
                 return false;
             }
         cpu.mod_base = m.base;
+        cpu.blk_base = a;
         e.fn(&cpu);
         ++stats.recomp_blocks;
         return true;
