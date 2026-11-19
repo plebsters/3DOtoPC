@@ -192,7 +192,13 @@ Drop the same game again and the code it had to interpret is recompiled (`interp
   costs CPU time, because the CPU waits while the cel engine draws: about half
   a CPU clock per pixel written (the engine runs on the 25 MHz system clock) plus
   40 per cel. The cost of a non-sequential memory access is a run-time setting
-  (`TDORT_N_CLOCKS`), so it can be tuned without converting the game again. Each frame gets 12.5 MHz / 60 Hz of
+  (`TDORT_N_CLOCKS`), so it can be tuned without converting the game again.
+  Each OS call costs 200 clocks, about what Portfolio spends entering the kernel and
+  checking the call (`TDORT_OS_CYCLES`). Disc reads move about 300 KB a second, as a
+  2x drive does: an asynchronous read finishes when the drive would be done, and a
+  synchronous one (`DoIO`) makes its task wait for the drive. Several small reads can
+  finish in the same frame. SPORT copies (VRAM fills and page copies) finish at the
+  next vertical blank, as on the console. Each frame gets 12.5 MHz / 60 Hz of
   clocks; a game that needs more slows down, as on the console.
 * **Self-modifying code / overlays.** Writes into recompiled code are tracked
   in 64-byte granules. A block whose bytes change falls back to the
@@ -324,6 +330,8 @@ Environment variables:
 | `TDORT_OLD_IO=1` | old I/O behaviour (timer `SendIO` sleeps the caller, `WaitIO` returns at once), as a fallback |
 | `TDORT_DEBUG_IO=1` | log deferred I/O completions and `AbortIO` |
 | `TDORT_CD_SPEED=5120` | disc read speed in bytes per frame for asynchronous reads (default 5120, a 2x drive; 0 = instant) |
+| `TDORT_CD_SYNC=0` | synchronous disc reads (`DoIO`) finish at once instead of waiting for the drive |
+| `TDORT_OS_CYCLES=200` | CPU clocks charged for each OS call (default 200; 0 = OS calls are free) |
 | `TDORT_OLD_BITMAP=1` | `CreateItem` of a bitmap makes a bare item, as before (fallback) |
 | `TDORT_DEBUG_DISPLAY=1` | log `DisplayScreen` and `DrawCels` targets |
 | `TDORT_DUMP_API=api.tsv` | write the table of implemented OS calls (for `api_coverage.py`) |
@@ -474,13 +482,15 @@ against the local game builds before release.
 **Not done yet:**
 * Sound DSP effects (reverb, filters, echo) pass the sound through unchanged.
 * Light gun, mouse and two-player input are untested.
-* CPU timing counts the ARM60's clocks per instruction and the cel engine's drawing time,
-  but not yet DMA, memory-page timing or the time Portfolio itself would spend in OS calls
-  (those are free here), so CPU-bound games can still run a little faster than on a console.
+* CPU timing counts the ARM60's clocks per instruction, the cel engine's drawing time, a
+  flat cost per OS call and the CD drive's speed. Not modelled: DRAM page timing (the
+  memory cost is a single datasheet figure), how much longer some OS calls take than
+  others, disc seek time, and load time for programs started with `LoadCode` /
+  `LoadProgram` (they load at once).
 
 ## Roadmap
 
-1. Speed model: OS call cost and DMA timing (cycles per instruction and cel engine time are done).
+1. Speed model: per-call OS costs, disc seek time (instruction, drawing, OS call and drive timing are done).
 2. Cinepak / streaming-movie library, DSP effects, more input devices.
 3. Recompiler optimizations: direct block chaining, register caching, jump-table recovery.
 4. Per-game patch files (widescreen, 60 fps, input remaps) and an Xbox UWP platform layer.

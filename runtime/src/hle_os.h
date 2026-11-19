@@ -234,7 +234,7 @@ private:
     void    sport_io(HleItem& ior, uint32_t info);
     void    complete_io(HleItem& ior, int32_t err, uint32_t actual, int32_t task_item = 0);
     struct VblIo { int32_t ior, task, err; uint32_t actual; uint32_t due_frame = 0; };
-    uint32_t cd_free_frame_ = 0;                      // when the simulated CD drive finishes its queued reads
+    uint64_t cd_free_pos_ = 0;                        // when the CD drive is free, in bytes of drive time (frame * bytes per frame)                      // when the simulated CD drive finishes its queued reads
     std::vector<VblIo> vbl_io_;                       // requests that finish later: SPORT at the next vertical blank, timers when due
     void    defer_io(HleItem& ior, uint32_t frames);
     static bool old_io();

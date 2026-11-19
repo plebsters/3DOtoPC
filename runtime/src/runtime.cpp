@@ -559,8 +559,18 @@ static void watch_check(Runtime& rt, const char* what) {
     if (v != last) { rt.log("watch %08X: %08X -> %08X before %s (pc=%08X lr=%08X)", addr, last, v, what, rt.cpu.r[15], rt.cpu.r[14]); last = v; }
 }
 
+// Time the OS itself would spend on a call: Portfolio enters the kernel
+// through a SWI, checks the arguments and finds the item, which takes a few
+// hundred clocks on the ARM60. Here the call costs nothing on the guest CPU,
+// so it is charged a flat amount (TDORT_OS_CYCLES=<clocks>, 0 = free).
+static uint32_t os_call_clocks() {
+    static const uint32_t v = [] { const char* e = std::getenv("TDORT_OS_CYCLES"); return e ? uint32_t(std::strtoul(e, nullptr, 10)) : 200u; }();
+    return v;
+}
+
 bool Runtime::handle_swi(uint32_t comment, uint32_t pc) {
     ++stats.hle_calls;
+    if (cpu.real_timing) cpu.cycles += os_call_clocks();
     { char w[32]; std::snprintf(w, sizeof w, "SWI %X", comment); watch_check(*this, w); }
     auto it = swis_.find(comment);
     if (it == swis_.end()) {
@@ -584,6 +594,7 @@ bool Runtime::handle_swi(uint32_t comment, uint32_t pc) {
 
 void Runtime::handle_trap(uint32_t addr) {
     ++stats.hle_calls;
+    if (cpu.real_timing) cpu.cycles += os_call_clocks();
     uint32_t idx = (addr - kTrapBase) / 4;
     watch_check(*this, idx < traps_.size() ? traps_[idx].name.c_str() : "trap");
     const uint32_t ret = cpu.r[14];

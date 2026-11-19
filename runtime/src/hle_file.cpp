@@ -728,12 +728,29 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
             const char* e = std::getenv("TDORT_CD_SPEED");
             return e ? uint32_t(std::strtoul(e, nullptr, 10)) : 5120u;
         }();
-        if (!io_quick_ && cd_bpf && !old_io()) {
-            const uint32_t frames = std::max<uint32_t>(1, (rlen + cd_bpf - 1) / cd_bpf);
-            const uint32_t begin = int32_t(cd_free_frame_ - frame_no_) > 0 ? cd_free_frame_ : frame_no_;
-            cd_free_frame_ = begin + frames;
-            w32(ior.addr + ioreq::Flags, r32(ior.addr + ioreq::Flags) & ~kIoDone);
-            vbl_io_.push_back({ior.num, cur().item, 0, rlen, cd_free_frame_});
+        // The drive's time is counted in bytes (cd_bpf a frame), so several
+        // small reads can finish in the same frame, as they would on the drive.
+        // A synchronous read (DoIO) makes its task wait for the drive too
+        // (TDORT_CD_SYNC=0: synchronous reads are instant, as before).
+        static const bool sync_wait = [] { const char* e = std::getenv("TDORT_CD_SYNC"); return !(e && e[0] == '0'); }();
+        const bool timed = cd_bpf && !old_io() && (!io_quick_ || (sync_wait && multitasking()));
+        if (timed) {
+            const uint64_t now = uint64_t(frame_no_) * cd_bpf;
+            const uint64_t begin = std::max(cd_free_pos_, now);
+            cd_free_pos_ = begin + rlen;
+            const uint32_t due = std::max<uint32_t>(frame_no_ + 1, uint32_t((cd_free_pos_ + cd_bpf - 1) / cd_bpf));
+            if (!io_quick_) {
+                w32(ior.addr + ioreq::Flags, r32(ior.addr + ioreq::Flags) & ~kIoDone);
+                vbl_io_.push_back({ior.num, cur().item, 0, rlen, due});
+                return;
+            }
+            complete_io(ior, 0, rlen);
+            // Short reads the drive finishes within this frame cost no wait.
+            if (cd_free_pos_ > now + cd_bpf) {
+                static bool said = false;
+                if (!said) { said = true; rt.log("CD: a synchronous read (%u bytes of %s) waits for the drive until frame %u (TDORT_CD_SYNC=0: no wait)", rlen, f.guest_path.c_str(), due); }
+                sleep_until(due);
+            }
             return;
         }
         complete_io(ior, 0, rlen);
