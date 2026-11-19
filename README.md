@@ -183,6 +183,17 @@ Drop the same game again and the code it had to interpret is recompiled (`interp
   runtime recognises the file by its hash and, once the program has relocated itself and
   reaches its entry point, switches on each translated block whose bytes still match.
   The log says `program "TF": 5960 of 5974 translated blocks match and run natively`.
+* **CPU timing.** The ARM60 runs at 12.5 MHz with no cache, so instructions
+  take different times: a register move 1 clock, a load 4, a branch 4, a
+  multiple-register store about 1 per register plus 3. `runtime/include/tdort/arm_timing.h`
+  holds the table (from the ARM6 datasheet: S = 1 clock, N = 2, I = 1). The
+  translator adds it up per block when it writes the C++, and the interpreter
+  adds it per instruction, so both paths run at the same speed. `DrawCels` also
+  costs CPU time, because the CPU waits while the cel engine draws: about half
+  a CPU clock per pixel written (the engine runs on the 25 MHz system clock) plus
+  40 per cel. The cost of a non-sequential memory access is a run-time setting
+  (`TDORT_N_CLOCKS`), so it can be tuned without converting the game again. Each frame gets 12.5 MHz / 60 Hz of
+  clocks; a game that needs more slows down, as on the console.
 * **Self-modifying code / overlays.** Writes into recompiled code are tracked
   in 64-byte granules. A block whose bytes change falls back to the
   interpreter permanently. A LaunchMe hash check turns on interpreter-only
@@ -210,6 +221,17 @@ Drop the same game again and the code it had to interpret is recompiled (`interp
 3. GUI: `dotnet build gui\TdoConverter -c Release`. This copies `tdocore.dll` and `runtime\` next to the app.
    (`Build-App.bat` does steps 2-3 for you.)
 
+### Faster conversions: the runtime library cache
+
+The runtime library (the Portfolio replacement, about 60% of the compile work) is the same
+for every game, so it is compiled once per runtime version and kept in `cache/` next to the
+converter (or in the temp folder if that one isn't writable). Each conversion then compiles
+only the game's own translated code: a small game takes about 9 s instead of 26 s on a
+2-core machine. A new package changes the runtime, so its first conversion builds the cache
+again, once. The build also uses every CPU core (`--parallel`), with Ninja or the Visual
+Studio generator. Set `TDO_NO_RUNTIME_CACHE=1` to build the runtime with each game as
+before; delete `cache/` to clear it.
+
 ### Compiler used for converted games (all local)
 1. `toolchain\` next to the app: portable `cmake\`, `ninja\`, `llvm\` (optional `windows-sdk.cmake`). Lets you ship a self-contained app.
 2. Visual Studio / Build Tools, found through `vswhere.exe`.
@@ -222,6 +244,9 @@ Drop the same game again and the code it had to interpret is recompiled (`interp
 "3DO to PC CLI" convert  game.iso out\ [--name N] [--hints interp_hits.txt] [--no-build] [--debug]
 "3DO to PC CLI" toolchain
 ```
+To re-convert a game after updating 3DO to PC, convert its own `data` folder into the same
+folder: `"3DO to PC CLI" convert out\data out\ --name N` (add `--disc out\data_disc2` and so
+on for multi-disc games). The game files are reused in place, not copied again.
 Converted game flags: `--interp` (interpreter only), `--trace` (log HLE calls), `--headless`.
 Each run writes `tdort.log`. Every unimplemented SWI or folio call is logged
 once with its arguments, so the log is the to-do list for that game.
@@ -284,17 +309,21 @@ Environment variables:
 | `TDORT_TRACE_READS=1` | log every file read |
 | `TDORT_MEM_TRACE=1` | log every allocation and free |
 | `TDORT_WATCH=2AFA64` | log when that memory word changes (checked at each OS call) |
-| `TDORT_BREAK=3C6C8` | log the registers and 8 words at the stack each time code reaches that address |
-| `TDORT_BREAK_DUMP=2ABE20` | with `TDORT_BREAK`, also log 32 words at that address |
+| `TDORT_BREAK=3C6C8,2C27C` | log the frame, the registers and 8 words at the stack each time code reaches one of those addresses |
+| `TDORT_BREAK_DUMP=2ABE20` | with `TDORT_BREAK`, also log 32 words at that address (or `r4`: at the address in that register) |
 | `TDORT_NULLREAD=1` | when a disc read goes to address 0, log the caller chain |
 | `TDORT_DUMP_SWITCH=<thread>` | log that thread's frame pointer and saved frame each time it resumes |
 | `TDORT_DUMPMEM=frame:addr:len` | write guest memory to `mem_<frame>.bin` |
 | `TDORT_SLEEP_TRACE=1` | log audio-clock sleeps and the tags of `CreateSample`/`SetAudioItemInfo` |
 | `TDORT_AUDIO_STATUS=1` | keep the status line going past 60 s, with the active voices |
-| `TDORT_SPEED_TRACE=1` | every 2 s: how many frames used all the CPU |
-| `TDORT_CPI=2` | cycles per instruction (default 1); higher gives games less CPU per frame |
+| `TDORT_SPEED_TRACE=1` | every 2 s: how many frames used all the CPU, and the average CPU load |
+| `TDORT_TIMING=old` | old speed model: one clock per instruction and free drawing (games get about twice the CPU) |
+| `TDORT_CEL_CYCLES=0.5` | CPU clocks lost per pixel the cel engine draws (default 0.5; 0 = drawing is free) |
+| `TDORT_N_CLOCKS=2` | clocks per non-sequential memory access (default 2, from the datasheet; 1 = faster memory, games get more CPU) |
+| `TDORT_CPI=2` | divides the clocks per frame (default 1); higher gives games less CPU per frame |
 | `TDORT_OLD_IO=1` | old I/O behaviour (timer `SendIO` sleeps the caller, `WaitIO` returns at once), as a fallback |
 | `TDORT_DEBUG_IO=1` | log deferred I/O completions and `AbortIO` |
+| `TDORT_CD_SPEED=5120` | disc read speed in bytes per frame for asynchronous reads (default 5120, a 2x drive; 0 = instant) |
 | `TDORT_OLD_BITMAP=1` | `CreateItem` of a bitmap makes a bare item, as before (fallback) |
 | `TDORT_DEBUG_DISPLAY=1` | log `DisplayScreen` and `DrawCels` targets |
 | `TDORT_DUMP_API=api.tsv` | write the table of implemented OS calls (for `api_coverage.py`) |
@@ -354,13 +383,36 @@ controller input from keyboard and Xbox pad, NVRAM saves, debug console, crash r
 
 **Milestone 4 (done): real games.** Compatibility is tracked in the "3DO to PC —
 Compatibility Status" sheet. Playable: Real Pinball, Slam 'n Jam '95, Gex, Burning Soldier,
-Crash 'n Burn, Demolition Man, John Madden Football, FIFA International Soccer. Partly working: Brain Dead 13 (video
+Crash 'n Burn, Demolition Man, John Madden Football, FIFA International Soccer. Movies play in
+Sewer Shark, Corpse Killer, Night Trap, Drug Wars (menu) and Dragon's Lair. Partly working: Brain Dead 13 (video
 scenes play), Creature Shock (intro plays), Doom (reaches E1M1), Captain Quazar, Escape from
 Monster Manor, Alone in the Dark, Jurassic Park Interactive, Another World, Ballz, Cannon
 Fodder, Hell, Cyberia (reaches the name entry), Dragon Lore (intro with sound and the main
 menu).
 
 Fixes found by running games (each a difference from the real OS):
+* EZFlix movies (Zhadnost, Killing Time): the library decodes its video on the sound chip:
+  `ezflix225.dsp` (and the older `vpp4.dsp`) turn each 16-bit word of the compressed Y, Y and
+  UV planes into four delta pairs from two 16-entry tables (loaded from a fourth FIFO), and
+  the ARM code adds them up into the picture. The runtime does that translation natively,
+  so the movies play (they showed a flat grey box). Their sound is ordinary SDX2 stereo
+  through the streaming library and plays as before. `TDORT_NO_VPP=1` turns it off.
+* Twisted: The Game Show: disc reads finished at once, so its own streaming code reached a
+  "wait" chunk before the stream's subscribers had answered its start command; the chunk
+  clears the pending answers, the start ran twice and failed, and the opening was dropped.
+  Asynchronous disc reads now take as long as on a 2x CD drive (about 5 KB a frame, one
+  request at a time); `TDORT_CD_SPEED=<bytes per frame>` changes it, `0` makes reads instant.
+* Corpse Killer: event broker "button pressed" and "button released" frames carried the whole
+  pad, where the console's pad driver puts only the buttons that just went down or came up.
+  The game clears held buttons from released frames, so its gun fired on its own and the
+  crosshair kept sliding to the screen edges. (`TDORT_OLD_PAD_EVENTS=1` restores the old way.)
+* Sewer Shark, Corpse Killer, Night Trap (Digital Pictures' movie engine): messages created
+  with `CREATEMSG_TAG_MSG_IS_SMALL` didn't get the `MESSAGE_SMALL` flag, so the video thread
+  rejected every command ("Video: Unknown message!") and all threads waited forever. The
+  intros now play.
+* Night Trap: a missing file returned the kernel's generic "not found" instead of the file
+  folio's `ER_Fs_NoFile` error (`0xD556F101`), so the game never created its save file and
+  retried forever. Sewer Shark's boot file is called `Launchme`; it is now found in any case.
 * FIFA International Soccer: its movie player makes a bitmap with `CreateItem` (width,
   height, buffer tags) and decodes the Cinepak frames into `bm_Buffer`. The runtime made a
   bare item with no bitmap fields, so the frames went to address 0 and the screen stayed
@@ -375,7 +427,7 @@ Fixes found by running games (each a difference from the real OS):
 * FIFA International Soccer: `LookupItem(0)` gave 0 instead of KernelBase (item 0 is the
   kernel). The 1.x `WaitIO` looks up `io_MsgItem`, which is 0 without a reply port, and read
   garbage, so its timer task polled forever at the highest priority.
-* Zhadnost and Killing Time now get past their logos (EZFlix sound player, below).
+* Zhadnost and Killing Time now get past their logos, and their EZFlix movies play (above).
 * Myst, 3DO Multi Game Sampler 3: the discs have file names Windows can't store (`?`, `<`,
   `>`), so conversion failed. Such characters are now stored as `%XX` and the runtime reads
   the names back exactly (`tdort/host_name.h`).
@@ -390,9 +442,6 @@ Fixes found by running games (each a difference from the real OS):
   wasn't there. The stack limit is now the kernel's (base + 128) and the stack grows.
 * `printf`/`sprintf` text now goes through the C library's own output routine (the fifth
   argument of the kernel call), as on the console, whatever the library version.
-* Zhadnost, Killing Time: the EZFlix movie library's sound player (`ezflix225.dsp`) was
-  unknown, so its end cues never came and the game waited forever. It now plays silently
-  at its pace (its sound format isn't decoded yet).
 * Dragon Lore: `CreateSample` ignored an AIFF image in memory, so its sound buffer had no
   address and the next movie read its first block over address 0 and crashed; samples
   attached to an instrument template were refused; `AdoptInstrument` made a new instrument
@@ -424,15 +473,14 @@ against the local game builds before release.
 
 **Not done yet:**
 * Sound DSP effects (reverb, filters, echo) pass the sound through unchanged.
-* Some games with their own streaming code still stall (Twisted waits for an event that
-  never arrives after its opening stream).
 * Light gun, mouse and two-player input are untested.
-* CPU timing counts one cycle per instruction and drawing costs no CPU time, so games that
-  run as fast as the CPU allows can run faster than on a console (`TDORT_CPI` adjusts it).
+* CPU timing counts the ARM60's clocks per instruction and the cel engine's drawing time,
+  but not yet DMA, memory-page timing or the time Portfolio itself would spend in OS calls
+  (those are free here), so CPU-bound games can still run a little faster than on a console.
 
 ## Roadmap
 
-1. A more accurate speed model (cycles per instruction, cel engine time).
+1. Speed model: OS call cost and DMA timing (cycles per instruction and cel engine time are done).
 2. Cinepak / streaming-movie library, DSP effects, more input devices.
 3. Recompiler optimizations: direct block chaining, register caching, jump-table recovery.
 4. Per-game patch files (widescreen, 60 fps, input remaps) and an Xbox UWP platform layer.
