@@ -25,6 +25,8 @@ struct Cpu {
     uint32_t ctl = 0x10;   // CPSR bits 7..0 (I, F, mode). 0x10 = user32.
 
     uint64_t cycles = 0;
+    bool     real_timing = true;   // charge ARM60 cycle counts (false: 1 per instruction, TDORT_TIMING=old)
+    uint32_t n_clocks = 2;         // clocks per non-sequential memory cycle (TDORT_N_CLOCKS)
     bool     halted = false;
 
     uint32_t mod_base = 0;   // load address of the module whose translated block is running

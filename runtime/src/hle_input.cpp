@@ -99,6 +99,7 @@ void Portfolio::broker_post(Listener& l, uint32_t pad) {
     if (!item(l.port)) return;
     const uint32_t wants = l.trigger | l.capture;
     const uint32_t pressed = pad & ~last_pad_, released = last_pad_ & ~pad;
+    static const bool old_events = std::getenv("TDORT_OLD_PAD_EVENTS") != nullptr;
     std::vector<uint32_t> events;
     // "Giving focus" (event 19) once when the listener starts: games that ask
     // for it (Slam 'n Jam) ignore the pad until they have the focus.
@@ -146,7 +147,18 @@ void Portfolio::broker_post(Listener& l, uint32_t pad) {
         w8(f + evframe::PodPosition, 1);
         w8(f + evframe::GenericPosition, 1);
         w8(f + evframe::Trigger, (l.trigger & ev_bit(ev)) ? 1 : 0);
-        w32(f + evframe::EventData, ev == kEvGivingFocus ? 0 : pad);
+        // As the console's control pad driver: a "pressed" frame holds only the
+        // buttons that just went down, a "released" frame only those that just
+        // came up; update/arrived frames hold the whole pad. (Corpse Killer
+        // clears held buttons from released frames; with the whole pad there
+        // its gun kept firing and the crosshair kept moving.)
+        uint32_t data = pad;
+        if (ev == kEvGivingFocus) data = 0;
+        else if (!old_events) {
+            if (ev == kEvControlPressed) data = pressed;
+            else if (ev == kEvControlReleased) data = released;
+        }
+        w32(f + evframe::EventData, data);
         off += evframe::PadFrameSize;
     }
     for (uint32_t k = 0; k < evframe::PadFrameSize; k += 4) w32(buf + off + k, 0);   // terminating frame

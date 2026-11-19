@@ -222,7 +222,7 @@ int32_t Portfolio::delete_nvram_file(const std::string& path) {
     std::string host;
     if (!nvram_path(path, host)) return kErrNotSupported;
     std::error_code ec;
-    if (!fs::remove(fs::u8path(host), ec)) return kErrNotFound;
+    if (!fs::remove(fs::u8path(host), ec)) return kErrFsNoFile;
     rt.log("NVRAM: deleted %s", path.c_str());
     return 0;
 }
@@ -231,7 +231,7 @@ int32_t Portfolio::open_file(const std::string& path, const std::string& base_di
     std::string nv;
     if (nvram_path(path, nv)) {
         std::error_code ec;
-        if (!fs::exists(fs::u8path(nv), ec)) { rt.log("OpenDiskFile(\"%s\"): not found (NVRAM)", path.c_str()); return kErrNotFound; }
+        if (!fs::exists(fs::u8path(nv), ec)) { rt.log("OpenDiskFile(\"%s\"): not found (NVRAM)", path.c_str()); return kErrFsNoFile; }
         HleItem& f = new_item(ItemKind::File, kSubsysFile, kNodeFile, device::Size, decode_host_name(fs::u8path(nv).filename().u8string()));
         f.guest_path = path; f.host_path = nv; f.writable = true; f.block_size = 1;
         f.file_size = fs::file_size(fs::u8path(nv), ec);
@@ -248,7 +248,7 @@ int32_t Portfolio::open_file(const std::string& path, const std::string& base_di
     bool dir = false;
     bool ok = resolve(path, host, norm, dir);
     cwd_ref() = saved;
-    if (!ok) { rt.log("OpenDiskFile(\"%s\"): not found", path.c_str()); return kErrNotFound; }
+    if (!ok) { rt.log("OpenDiskFile(\"%s\"): not found", path.c_str()); return kErrFsNoFile; }
 
     HleItem& f = new_item(ItemKind::File, kSubsysFile, kNodeFile, device::Size, fs::u8path(norm).filename().u8string());
     f.guest_path = norm;
@@ -387,7 +387,7 @@ void Portfolio::install_file() {
         const std::string path = rstr(arg(0));
         const uint32_t out = arg(1);
         std::string host, norm; bool dir = false;
-        if (!resolve(path, host, norm, dir) || dir) { rt.log("LoadCode(\"%s\"): not found", path.c_str()); c.r[0] = uint32_t(kErrNotFound); return; }
+        if (!resolve(path, host, norm, dir) || dir) { rt.log("LoadCode(\"%s\"): not found", path.c_str()); c.r[0] = uint32_t(kErrFsNoFile); return; }
         std::ifstream f(fs::u8path(host), std::ios::binary);
         std::vector<uint8_t> file((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         AifImage img; std::string why;
@@ -585,7 +585,7 @@ void Portfolio::install_file() {
     });
     F(kChangeDirectory, "ChangeDirectory", [this](Cpu*) {
         std::string host, norm; bool dir = false;
-        if (!resolve(rstr(arg(0)), host, norm, dir) || !dir) { c.r[0] = uint32_t(kErrNotFound); return; }
+        if (!resolve(rstr(arg(0)), host, norm, dir) || !dir) { c.r[0] = uint32_t(kErrFsNoFile); return; }
         cwd_ref() = norm == "/" ? "" : norm;
         c.r[0] = uint32_t(open_file(norm.empty() ? "/cd-rom" : "/cd-rom" + norm, ""));
     });
@@ -717,6 +717,25 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
         if (recent_reads_.size() > 8) recent_reads_.pop_front();
         if (rt.cfg.trace || std::getenv("TDORT_TRACE_READS"))
             rt.log("read %s block %u: %u bytes (%u from the file) -> %08X-%08X", f.guest_path.c_str(), offset, rlen, len, rbuf, rbuf + rlen);
+        // A CD drive moves about 300 KB a second (5 KB a frame), one request
+        // at a time. An asynchronous read finishes when the drive would be
+        // done with it. Streaming code depends on that pace: Twisted's stream
+        // reaches a "wait" chunk only after the subscribers have answered
+        // its start command; with reads finishing at once it got there first,
+        // cleared the pending answers and the opening was abandoned.
+        // TDORT_CD_SPEED=<bytes per frame> (0: instant, the old behaviour).
+        static const uint32_t cd_bpf = [] {
+            const char* e = std::getenv("TDORT_CD_SPEED");
+            return e ? uint32_t(std::strtoul(e, nullptr, 10)) : 5120u;
+        }();
+        if (!io_quick_ && cd_bpf && !old_io()) {
+            const uint32_t frames = std::max<uint32_t>(1, (rlen + cd_bpf - 1) / cd_bpf);
+            const uint32_t begin = int32_t(cd_free_frame_ - frame_no_) > 0 ? cd_free_frame_ : frame_no_;
+            cd_free_frame_ = begin + frames;
+            w32(ior.addr + ioreq::Flags, r32(ior.addr + ioreq::Flags) & ~kIoDone);
+            vbl_io_.push_back({ior.num, cur().item, 0, rlen, cd_free_frame_});
+            return;
+        }
         complete_io(ior, 0, rlen);
         return;
     }

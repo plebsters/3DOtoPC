@@ -1247,6 +1247,13 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
                 w32(m.addr + message::DataPtrSize, data_size);
                 w8(m.addr + node::Flags, uint8_t(r8(m.addr + node::Flags) | 0x08));   // MESSAGE_PASS_BY_VALUE
             }
+            // A small message carries two values in DataPtr/DataSize; receivers
+            // check MESSAGE_SMALL (Digital Pictures' movie engine rejects the
+            // message without it: "Video: Unknown message!").
+            bool is_small = false;
+            each_tag(tags, [&](uint32_t t, uint32_t) { if (t == kTagMsgIsSmall) is_small = true; });
+            if (is_small && !data_size)
+                w8(m.addr + node::Flags, uint8_t(r8(m.addr + node::Flags) | 0x04));   // MESSAGE_SMALL
             return m.num;
         }
         case kNodeTask: {

@@ -6,6 +6,7 @@
 // calls that handler directly instead of the whole decoder: the handlers are
 // force-inlined, and the compiler has far less to wade through (Visual Studio
 // took 10-30 minutes a game with the decoder inlined at every instruction).
+#include "tdort/arm_timing.h"
 #include "tdo/recomp.h"
 #include "tdort/memory.h"
 #include "tdort/arm_isa.h"
@@ -61,6 +62,37 @@ static std::string c_escape(const std::string& s) {
     return o;
 }
 
+// Cycles a block takes on an ARM60 (see tdort/arm_timing.h), and the part
+// to give back when its last instruction is a conditional jump that was not
+// taken (the block then runs to its end).
+static tdort::ArmCost block_cost(const tdort::AifImage& img, const Block& b, tdort::ArmCost* refund) {
+    tdort::ArmCost sum{}; uint32_t last = 0;
+    for (uint32_t k = 0; k < b.count; ++k) {
+        last = load_be32(&img.bytes[b.start - img.image_base + 4 * k]);
+        sum = sum + tdort::arm_cost(last);
+    }
+    *refund = {};
+    if (b.count && tdort::cond_of(last) != 0xE && tdort::writes_pc(last)) {
+        const tdort::ArmCost full = tdort::arm_cost(last), skip = tdort::arm_cost_skipped();
+        *refund = {full.si - skip.si, full.n - skip.n};
+    }
+    return sum;
+}
+
+static std::string clocks_expr(tdort::ArmCost c) {
+    if (!c.n) return std::to_string(c.si) + "u";
+    return std::to_string(c.si) + "u + " + std::to_string(c.n) + "u * c->n_clocks";
+}
+
+static std::string cycles_line(const tdort::AifImage& img, const Block& b, tdort::ArmCost* refund) {
+    const tdort::ArmCost real = block_cost(img, b, refund);
+    return "    c->cycles += c->real_timing ? " + clocks_expr(real) + " : " + std::to_string(b.count) + "u;\n";
+}
+
+static std::string refund_line(tdort::ArmCost r) {
+    return (r.si || r.n) ? "    if (c->real_timing) c->cycles -= " + clocks_expr(r) + ";\n" : std::string();
+}
+
 // fnv1a-32 of a block's instruction words: the runtime compares it with the
 // program in memory before running the translated block.
 static uint32_t block_check(const tdort::AifImage& img, const Block& b) {
@@ -87,11 +119,13 @@ static void emit_module(const ModuleSource& m, size_t k, uint32_t per, const std
             const uint32_t off = b.start - img.image_base;
             o << "void " << pre << hex8(off) << "(Cpu* c) {\n";
             o << "    const uint32_t B = c->mod_base;\n";
-            o << "    c->cycles += " << b.count << ";\n";
+            tdort::ArmCost refund{};
+            o << cycles_line(img, b, &refund);
             for (uint32_t q = 0; q < b.count; ++q) {
                 uint32_t i = load_be32(&img.bytes[off + 4 * q]);
                 o << "    " << emit_insn(i, off + 4 * q, true) << "  // " << disasm(i, off + 4 * q) << "\n";
             }
+            o << refund_line(refund);
             o << "    c->r[15] = B + 0x" << hex8(off + 4 * b.count) << "u;\n}\n\n";
         }
         files.push_back(name);
@@ -130,12 +164,14 @@ std::vector<std::string> emit_cpp(const tdort::AifImage& img, const Analysis& a,
             const Block& b = *blocks[idx];
             o << "// " << disasm(load_be32(&img.bytes[b.start - img.image_base]), b.start) << " ...\n";
             o << "void tdo_b_" << hex8(b.start) << "(Cpu* c) {\n";
-            o << "    c->cycles += " << b.count << ";\n";
+            tdort::ArmCost refund{};
+            o << cycles_line(img, b, &refund);
             for (uint32_t k = 0; k < b.count; ++k) {
                 uint32_t pc = b.start + 4 * k;
                 uint32_t i = load_be32(&img.bytes[pc - img.image_base]);
                 o << "    " << emit_insn(i, pc) << "  // " << disasm(i, pc) << "\n";
             }
+            o << refund_line(refund);
             o << "    c->r[15] = 0x" << hex8(b.start + 4 * b.count) << "u;\n}\n\n";
         }
         files.push_back(name);

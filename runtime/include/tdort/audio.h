@@ -70,6 +70,11 @@ public:
         Kind     kind = Kind::Effect;
         bool     fixed_rate = false, half_rate = false, stereo = false;
         bool     silent = false;          // a player whose sound format isn't decoded (EZFlix)
+        // vpp4.dsp (EZFlix video): not a sound instrument. Each 16-bit word from
+        // InFIFOk becomes four table entries (one per 4-bit code, top first) on
+        // OutFIFOk; FIFOs 1 and 2 use YQuantVals, FIFO 3 UVQuantVals.
+        bool     vpp = false;
+        uint16_t vpp_tab[2][16] = {};     // [0] UVQuantVals, [1] YQuantVals
         int32_t  freq_unit = 0x4000;      // Frequency knob value for normal speed (0x8000 on var* players)
         // The DSP program decides how sample data is read: "...8" players read
         // 8-bit PCM, "...16" 16-bit, the dcsqxd players SDX2, adpcm ADP4.
@@ -99,6 +104,7 @@ public:
     void add_sample(int32_t item, const Sample& s) { samples_[item] = s; }
     void add_envelope(int32_t item, const Envelope& e) { envelopes_[item] = e; }
     void add_attachment(int32_t item, const Attachment& a);
+    void set_vpp_tables(int32_t ins, const uint16_t* uv, const uint16_t* y);
     void remove(int32_t item);              // any audio item
     Sample*     sample(int32_t i)     { auto it = samples_.find(i); return it == samples_.end() ? nullptr : &it->second; }
     Instrument* instrument(int32_t i) { auto it = ins_.find(i); return it == ins_.end() ? nullptr : &it->second; }
@@ -142,6 +148,7 @@ private:
     bool  sampler_frame(Instrument& in, Attachment& a, float& l, float& r);
     int32_t decode(Attachment& a, const Sample& s, int64_t frame, int ch);
     void  attachment_ended(int32_t id, Attachment& a, Instrument& in);
+    void  vpp_run(Instrument& in);
     float envelope_gain(Instrument& in);
     bool  has_active_envelope(const Instrument& in) const;
     int32_t knob(const Instrument& in, const char* name, int32_t def) const;

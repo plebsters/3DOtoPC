@@ -1,5 +1,13 @@
 # tdort - runtime linked into every converted game.
-# Converted games add this directory with add_subdirectory() and link tdort.
+# Converted games either link a copy prebuilt once into the converter's cache
+# (built from this file as its own project), or add this directory with
+# add_subdirectory() and link tdort.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    cmake_minimum_required(VERSION 3.16)
+    project(tdort CXX)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+endif()
 add_library(tdort STATIC
     src/runtime.cpp
     src/hle_kernel.cpp

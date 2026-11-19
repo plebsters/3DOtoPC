@@ -111,11 +111,63 @@ int32_t Portfolio::audio_new(uint8_t type, const std::string& name) {
     return new_item(ItemKind::Generic, kSubsysAudio, type, 64, name).num;
 }
 
+// vpp4.dsp's lookup tables, from the game's own copy of the file: its DINI
+// chunk holds { count, ?, resource, ? } + count words per table, and its
+// DNMS chunk names the resources (UVQuantVals, YQuantVals, ...).
+void Portfolio::load_vpp_tables(int32_t ins, const std::string& name) {
+    std::string host, norm; bool dir = false;
+    const std::string tries[] = {name, "$audio/dsp/" + name, "/remote/System/Audio/dsp/" + name};
+    std::vector<uint8_t> f;
+    for (const auto& t : tries) {
+        if (!resolve(t, host, norm, dir) || dir) continue;
+        FILE* fp = std::fopen(host.c_str(), "rb");
+        if (!fp) continue;
+        uint8_t b[4096]; size_t n = std::fread(b, 1, sizeof b, fp); std::fclose(fp);
+        f.assign(b, b + n);
+        break;
+    }
+    if (f.empty()) return;
+    auto be = [&](size_t o) { return o + 4 <= f.size() ? load_be32(&f[o]) : 0u; };
+    std::vector<std::string> names;
+    size_t dini = 0, dini_len = 0;
+    for (size_t o = 0; o + 8 <= f.size();) {
+        const uint32_t id = be(o), len = be(o + 4);
+        if (id == 0x464F524Du) { o += 12; continue; }            // FORM: step into it
+        if (id == 0x444E4D53u)                                   // DNMS
+            for (size_t k = o + 8; k < o + 8 + len && k < f.size();) {
+                std::string sname;
+                while (k < f.size() && f[k]) sname += char(f[k++]);
+                ++k;
+                if (!sname.empty()) names.push_back(sname);
+            }
+        if (id == 0x44494E49u) { dini = o + 8; dini_len = len; }   // DINI
+        o += 8 + len + (len & 1);
+    }
+    uint16_t uv[16], y[16];
+    bool got_uv = false, got_y = false;
+    for (size_t o = dini; dini && o + 16 <= dini + dini_len;) {
+        const uint32_t count = be(o), rsc = be(o + 8);
+        if (count == 0 || count > 256) break;
+        const std::string rn = rsc < names.size() ? names[rsc] : "";
+        if (count == 16 && (rn == "UVQuantVals" || rn == "YQuantVals")) {
+            uint16_t* t = rn == "YQuantVals" ? y : uv;
+            for (int k = 0; k < 16; ++k) t[k] = uint16_t(be(o + 16 + 4 * size_t(k)));
+            (rn == "YQuantVals" ? got_y : got_uv) = true;
+        }
+        o += 16 + 4 * size_t(count);
+    }
+    if (got_uv && got_y) {
+        rt.audio->set_vpp_tables(ins, uv, y);
+        rt.log("vpp: tables from %s", host.c_str());
+    }
+}
+
 int32_t Portfolio::audio_instrument(int32_t tmpl) {
     auto it = templates_.find(tmpl);
     if (it == templates_.end()) return kErrBadItem;
     const int32_t ins = audio_new(kAuInstrument, it->second);
     rt.audio->add_instrument(ins, it->second);
+    if (Audio::Instrument* ai = rt.audio->instrument(ins); ai && ai->vpp) load_vpp_tables(ins, it->second);
     ins_template_[ins] = tmpl;
     // Samples and envelopes attached to the template come with each instrument.
     if (auto ta = template_attach_.find(tmpl); ta != template_attach_.end())

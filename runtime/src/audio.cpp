@@ -41,10 +41,9 @@ Audio::Kind Audio::classify(const std::string& tmpl, bool* fixed, bool* half, bo
         if (*half) *fixed = true;     // half-rate players run at a fixed 22050 Hz
         return Kind::Sampler;
     }
-    // The EZFlix movie library's sound player (ezflix225.dsp, 22.5 kHz): its
-    // sound format isn't known yet, so it plays silently, at its pace, so that
-    // its cues (which pace the movie) still come.
-    if (has(n, "ezflix")) { *fixed = true; *half = true; return Kind::Sampler; }
+    // ezflix225.dsp is not a sound player: the EZFlix movie library decodes its
+    // video with it (see vpp_run). TDORT_NO_VPP=1: the old silent sampler.
+    if (has(n, "ezflix") && std::getenv("TDORT_NO_VPP")) { *fixed = true; *half = true; return Kind::Sampler; }
     if (has(n, "envelope")) return Kind::Envelope;
     if (has(n, "saw") || has(n, "triangle") || has(n, "pulse") || has(n, "square") || has(n, "noise") ||
         has(n, "sine") || has(n, "osc"))
@@ -82,7 +81,19 @@ void Audio::add_instrument(int32_t item, const std::string& tmpl_name) {
     Instrument in;
     in.tmpl = base_name(tmpl_name);
     in.kind = classify(tmpl_name, &in.fixed_rate, &in.half_rate, &in.stereo, &in.inputs);
+    // TDORT_EZFLIX_SILENT=1: the old behaviour (EZFlix movie sound muted).
     in.silent = has(base_name(tmpl_name), "ezflix");
+    if ((has(in.tmpl, "vpp") || has(in.tmpl, "ezflix")) && !std::getenv("TDORT_NO_VPP")) {
+        // The tables vpp4.dsp ships with (its DINI chunk); the loader replaces
+        // them with the game's own file when it can read it.
+        static const uint16_t uv[16] = {0xF2F2, 0xF2FE, 0xF204, 0xF210, 0xFEF2, 0xFEFE, 0xFE04, 0xFE10,
+                                        0x04F2, 0x04FE, 0x0404, 0x0410, 0x10F2, 0x10FE, 0x1004, 0x1010};
+        static const uint16_t y[16]  = {0xE8E8, 0xE8FC, 0xE806, 0xE818, 0xFCE8, 0xFCFC, 0xFC06, 0xFC18,
+                                        0x06E8, 0x06FC, 0x0606, 0x0618, 0x18E8, 0x18FC, 0x1806, 0x1818};
+        in.vpp = true;
+        std::copy(uv, uv + 16, in.vpp_tab[0]);
+        std::copy(y, y + 16, in.vpp_tab[1]);
+    }
     if (in.kind == Kind::Sampler) {
         const std::string& n = in.tmpl;
         if (has(n, "duck")) {             // movie sound: fixed 22050 or 44100 Hz stereo
@@ -312,6 +323,64 @@ int32_t Audio::decode(Attachment& a, const Sample& s, int64_t frame, int ch) {
         }
     }
     return a.dec_val[std::min(ch, 1)];
+}
+
+void Audio::set_vpp_tables(int32_t ins, const uint16_t* uv, const uint16_t* y) {
+    if (Instrument* in = instrument(ins)) {
+        std::copy(uv, uv + 16, in->vpp_tab[0]);
+        std::copy(y, y + 16, in->vpp_tab[1]);
+    }
+}
+
+// vpp4.dsp: translate every started InFIFO/OutFIFO pair at once, then end
+// those attachments so the cue the player waits on (end of InFIFO1) fires.
+void Audio::vpp_run(Instrument& in) {
+    if (in.st == Instrument::St::Stopped || in.paused) return;
+    std::vector<int32_t> done;
+    // ezflix225.dsp loads its tables from InFIFO0 first: 16 pairs of
+    // (YQuantVals[i], UVQuantVals[i]).
+    for (int32_t aid : in.atts) {
+        auto it = atts_.find(aid);
+        if (it == atts_.end() || !it->second.active || it->second.fifo != "InFIFO0") continue;
+        if (const Sample* t = sample(it->second.sample); t && t->addr && t->bytes >= 64 && uint64_t(t->addr) + 64 <= kRamEnd)
+            for (int i = 0; i < 16; ++i) {
+                const uint32_t at = t->addr + uint32_t(i) * 4;
+                in.vpp_tab[1][i] = uint16_t(mem_.ram[at] << 8 | mem_.ram[at + 1]);
+                in.vpp_tab[0][i] = uint16_t(mem_.ram[at + 2] << 8 | mem_.ram[at + 3]);
+            }
+        done.push_back(aid);
+    }
+    for (int k = 1; k <= 3; ++k) {
+        int32_t ia = 0, oa = 0;
+        for (int32_t aid : in.atts) {
+            auto it = atts_.find(aid);
+            if (it == atts_.end() || !it->second.active) continue;
+            if (it->second.fifo == "InFIFO" + std::to_string(k)) ia = aid;
+            else if (it->second.fifo == "OutFIFO" + std::to_string(k)) oa = aid;
+        }
+        if (!ia || !oa) continue;
+        const Sample* si = sample(atts_[ia].sample);
+        const Sample* so = sample(atts_[oa].sample);
+        if (si && so && si->addr && so->addr) {
+            const uint16_t* tab = in.vpp_tab[k == 3 ? 0 : 1];
+            const uint32_t words = std::min(si->bytes / 2, so->bytes / 8);
+            std::vector<uint8_t> out(size_t(words) * 8);
+            for (uint32_t i = 0; i < words; ++i) {
+                const uint64_t at = uint64_t(si->addr) + i * 2;
+                const uint16_t w = at + 1 < kRamEnd ? uint16_t(mem_.ram[size_t(at)] << 8 | mem_.ram[size_t(at + 1)]) : 0;
+                for (int j = 0; j < 4; ++j) {
+                    const uint16_t v = tab[(w >> (12 - 4 * j)) & 15];
+                    out[i * 8 + j * 2] = uint8_t(v >> 8);
+                    out[i * 8 + j * 2 + 1] = uint8_t(v);
+                }
+            }
+            if (!out.empty() && uint64_t(so->addr) + out.size() <= kRamEnd) mem_.write_block(so->addr, out.data(), uint32_t(out.size()));
+            if (trace) std::fprintf(stderr, "[audio] vpp fifo %d: %u words %08X -> %08X\n", k, words, si->addr, so->addr);
+        }
+        done.push_back(ia);
+        done.push_back(oa);
+    }
+    for (int32_t aid : done) attachment_ended(aid, atts_[aid], in);
 }
 
 void Audio::attachment_ended(int32_t id, Attachment& a, Instrument& in) {
@@ -596,6 +665,7 @@ void Audio::mix(int16_t* out, int frames) {
         for (const Conn& c : conns_) if (c.src == id) { feeds = true; break; }
         if (!feeds) dac.push_back(id);
     }
+    for (auto& [id, in] : ins_) if (in.vpp) vpp_run(in);
     for (int i = 0; i < frames; ++i) {
         ++stamp_;
         float l = 0, r = 0;

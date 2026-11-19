@@ -88,7 +88,7 @@ constexpr uint32_t kTagEnd = 0, kTagJump = 254, kTagNop = 255;
 constexpr uint32_t kTagItemName = 1, kTagItemPri = 2;
 constexpr uint32_t kTagIOReqReplyPort = 10, kTagIOReqDevice = 11;
 constexpr uint32_t kTagPortSignal = 10;
-constexpr uint32_t kTagMsgReplyPort = 10, kTagMsgDataSize = 12;   // CREATEMSG_TAG_REPLYPORT, _DATA_SIZE
+constexpr uint32_t kTagMsgReplyPort = 10, kTagMsgIsSmall = 11, kTagMsgDataSize = 12;   // CREATEMSG_TAG_REPLYPORT, _MSG_IS_SMALL, _DATA_SIZE
 // CreateScreenGroup tags
 constexpr uint32_t kCsgDisplayHeight = 1, kCsgScreenCount = 2, kCsgScreenHeight = 3,
                    kCsgBitmapCount = 4, kCsgBitmapWidthArray = 5, kCsgBitmapHeightArray = 6,
@@ -195,7 +195,9 @@ constexpr uint32_t ByteCount = 0, SystemID = 4, TimeStamp = 8, Submitter = 12, E
 
 // Errors are negative. Our HLE uses one generic code per class.
 constexpr int32_t kErrBadItem = int32_t(0x81010101), kErrNoMem = int32_t(0x81010102),
-                  kErrNotFound = int32_t(0x81010103), kErrBadPtr = int32_t(0x81010104),
+                  kErrNotFound = int32_t(0x81010103),
+                  // the file folio's "no such file" (MakeFErr(..., ER_Fs_NoFile)); games compare with it
+                  kErrFsNoFile = int32_t(0xD556F101), kErrBadPtr = int32_t(0x81010104),
                   kErrNotSupported = int32_t(0x81010105), kErrBadCommand = int32_t(0x81010106),
                   kErrNoSignals = int32_t(0x81010107), kErrEof = int32_t(0x81010108);
 

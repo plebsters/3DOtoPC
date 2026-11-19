@@ -144,8 +144,8 @@ static void test_input(void) {
             u8* f = (u8*)(d + 1);
             while (*(u32*)f) {
                 u32 ev = f[16], buttons = *(u32*)(f + 28);
-                if (ev == 1 && (buttons & 0x08000000)) pressed = 1;          /* ControlA pressed */
-                if (ev == 2 && pressed && !(buttons & 0x08000000)) released = 1;
+                if (ev == 1 && (buttons & 0x08000000)) pressed = 1;          /* ControlA went down */
+                if (ev == 2 && pressed && (buttons & 0x08000000)) released = 1; /* frame holds the button that came up */
                 f += *(u32*)f;
             }
         }

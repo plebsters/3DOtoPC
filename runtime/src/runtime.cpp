@@ -1,12 +1,14 @@
 // runtime.cpp - hybrid dispatcher: recompiled blocks first, interpreter fallback.
 #include "tdort/runtime.h"
 #include "tdort/arm_exec.h"
+#include "tdort/arm_timing.h"
 #include "tdort/aif.h"
 #include "tdort/gfx.h"
 #include "tdort/audio.h"
 #include "tdort/platform.h"
 #include "hle_os.h"
 #include <algorithm>
+#include <filesystem>
 #include <cstdarg>
 #include <fstream>
 #include <iterator>
@@ -127,6 +129,20 @@ void Runtime::log(const char* fmt, ...) {
 
 bool Runtime::load_game(std::string& err) {
     std::string path = cfg.data_dir + "/" + cfg.launch_me;
+    // The disc's file system ignores case: some discs call it "Launchme".
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec))
+            for (const auto& e : std::filesystem::directory_iterator(cfg.data_dir, ec)) {
+                const std::string n = e.path().filename().string();
+                if (n.size() == cfg.launch_me.size() &&
+                    std::equal(n.begin(), n.end(), cfg.launch_me.begin(), [](char a, char b) {
+                        return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); })) {
+                    path = e.path().string();
+                    break;
+                }
+            }
+    }
     std::ifstream f(path, std::ios::binary);
     if (!f) { err = "cannot open " + path; return false; }
     std::vector<uint8_t> file((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -301,7 +317,8 @@ void Runtime::interp_block() {
         if (insn == 0) {
             if (++zero_run_ >= 16) { crash("executing zeroed memory (jumped to unloaded or freed memory)", pc); return; }
         } else zero_run_ = 0;
-        cpu.cycles += 1;
+        cpu.cycles += !cpu.real_timing ? 1u
+                    : arm_clocks(cond_pass(&cpu, cond_of(insn)) ? arm_cost(insn) : arm_cost_skipped(), cpu.n_clocks);
         if (exec(&cpu, insn, pc)) return;
         pc += 4;
         cpu.r[15] = pc;
@@ -317,9 +334,16 @@ void Runtime::run_for(uint64_t budget) {
         ring_[ring_pos_++ & 63] = pc;
         // TDORT_BREAK=<hex pc>: log the registers whenever a block starts there
         // (with --interp, at any instruction boundary the interpreter loop sees).
-        static const uint32_t brk = [] { const char* b = std::getenv("TDORT_BREAK"); return b ? uint32_t(std::strtoul(b, nullptr, 16)) : 0u; }();
-        if (brk && pc == brk)
-            log("break %08X: r0-r7 %08X %08X %08X %08X %08X %08X %08X %08X r8-r14 %08X %08X %08X %08X %08X %08X %08X", pc,
+        // TDORT_BREAK may list several addresses: "2C25C,2C27C".
+        static const std::vector<uint32_t> brks = [] {
+            std::vector<uint32_t> v;
+            if (const char* b = std::getenv("TDORT_BREAK"))
+                for (const char* q = b; *q;) { char* e; v.push_back(uint32_t(std::strtoul(q, &e, 16))); q = *e ? e + 1 : e; }
+            return v;
+        }();
+        const uint32_t brk = (!brks.empty() && std::find(brks.begin(), brks.end(), pc) != brks.end()) ? pc : 0u;
+        if (brk)
+            log("break %08X (frame %u): r0-r7 %08X %08X %08X %08X %08X %08X %08X %08X r8-r14 %08X %08X %08X %08X %08X %08X %08X", pc, frames_,
                 cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[4], cpu.r[5], cpu.r[6], cpu.r[7],
                 cpu.r[8], cpu.r[9], cpu.r[10], cpu.r[11], cpu.r[12], cpu.r[13], cpu.r[14]);
         // TDORT_BREAK_DUMP=<hex address>: also log 32 words there at the break
@@ -327,7 +351,7 @@ void Runtime::run_for(uint64_t budget) {
         static const char* brk_dump_s = std::getenv("TDORT_BREAK_DUMP");
         static const uint32_t brk_dump_fixed = brk_dump_s && brk_dump_s[0] != 'r' ? uint32_t(std::strtoul(brk_dump_s, nullptr, 16)) : 0u;
         const uint32_t brk_dump = brk_dump_s && brk_dump_s[0] == 'r' ? (cpu.r[std::atoi(brk_dump_s + 1) & 15] & ~3u) : brk_dump_fixed;
-        if (brk && pc == brk && brk_dump && brk_dump + 128 <= kRamEnd)
+        if (brk && brk_dump && brk_dump + 128 <= kRamEnd)
             for (uint32_t k = 0; k < 32; k += 8)
                 log("      [%08X] %08X %08X %08X %08X %08X %08X %08X %08X", brk_dump + k * 4,
                     load_be32(&mem.ram[brk_dump + k * 4]), load_be32(&mem.ram[brk_dump + k * 4 + 4]), load_be32(&mem.ram[brk_dump + k * 4 + 8]),
@@ -423,6 +447,15 @@ int Runtime::run(Platform* platform) {
     // so an instruction takes about cfg.cpi cycles on average.
     static const double cpi = [this] { const char* e = std::getenv("TDORT_CPI"); return e ? std::max(0.25, std::atof(e)) : cfg.cpi; }();
     const uint64_t per_frame = uint64_t(double(cfg.cpu_hz) / cfg.refresh_hz / cpi);
+    {   // TDORT_TIMING=old: every instruction takes one cycle (the model before ARM60 timing)
+        const char* t = std::getenv("TDORT_TIMING");
+        cpu.real_timing = !(t && std::string(t) == "old");
+        if (!cpu.real_timing) log("timing: 1 cycle per instruction (TDORT_TIMING=old)");
+        if (const char* n = std::getenv("TDORT_N_CLOCKS")) {
+            cpu.n_clocks = uint32_t(std::min(8l, std::max(1l, std::strtol(n, nullptr, 10))));
+            log("timing: a non-sequential memory cycle takes %u clocks (TDORT_N_CLOCKS)", cpu.n_clocks);
+        }
+    }
     uint32_t busy_frames = 0;
     static const bool speed_trace = std::getenv("TDORT_SPEED_TRACE") != nullptr;
     std::vector<int16_t> mixbuf;
@@ -447,9 +480,14 @@ int Runtime::run(Platform* platform) {
         // (timer device, SampleSystemTime) only counted executed instructions,
         // so a game that mostly waits saw seconds take minutes: Jurassic Park
         // Interactive held its "3 seconds" copyright screen forever.
+        static uint64_t used_sum = 0;
+        used_sum += std::min<uint64_t>(cpu.cycles - frame_start, per_frame);
         if (cpu.cycles < frame_start + per_frame) cpu.cycles = frame_start + per_frame;
         else ++busy_frames;          // the game used the whole frame: it runs as fast as the CPU allows
-        if (speed_trace && frames_ % 120 == 0) { log("speed: %u of the last 120 frames used all the CPU", busy_frames); busy_frames = 0; }
+        if (speed_trace && frames_ % 120 == 0) {
+            log("speed: %u of the last 120 frames used all the CPU; average load %.0f%%", busy_frames, 100.0 * double(used_sum) / double(per_frame * 120));
+            busy_frames = 0; used_sum = 0;
+        }
         // Debugging aid: TDORT_DUMPMEM=frame:addr:len writes guest memory to mem_<frame>.bin.
         if (const char* dm = std::getenv("TDORT_DUMPMEM")) {
             unsigned f = 0, a = 0, l = 0;

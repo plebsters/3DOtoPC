@@ -102,7 +102,16 @@ int32_t Portfolio::draw_cels(int32_t bitmap_item, uint32_t ccb) {
     if (t.clip_w <= 0) t.clip_w = t.width;
     if (t.clip_h <= 0) t.clip_h = t.height;
     if (std::getenv("TDORT_DEBUG_DISPLAY")) rt.log("DrawCels(bitmap %d -> buffer %08X, ccb %08X)", bitmap_item, t.buffer, ccb);
+    const uint64_t px0 = rt.gfx->pixels_written, cels0 = rt.gfx->cels_drawn;
     rt.gfx->draw_cels(t, ccb);
+    // DrawCels waits for the cel engine, and the engine holds the memory bus
+    // while it works: the CPU loses the time the drawing takes. The engine
+    // runs on the 25 MHz system clock, so about half a CPU clock per pixel
+    // written, plus the CCB and setup per cel
+    // (TDORT_CEL_CYCLES=<CPU clocks per pixel>, 0 = drawing is free).
+    static const double per_px = [] { const char* e = std::getenv("TDORT_CEL_CYCLES"); return e ? std::max(0.0, std::atof(e)) : 0.5; }();
+    if (c.real_timing && per_px > 0)
+        c.cycles += uint64_t(double(rt.gfx->pixels_written - px0) * per_px) + (rt.gfx->cels_drawn - cels0) * 40u;
     return 0;
 }
 
