@@ -963,7 +963,34 @@ void Portfolio::install_kernel_swis() {
         if (p) w32(p, size);
         c.r[0] = p;
     });
-    K(kControlMem, "ControlMem", [this](Cpu*) { c.r[0] = 0; });
+    // ControlMem(p, size, cmd, task). MEMC_GIVE (3) hands memory to another
+    // task, so it outlives the giver, or with task 0 back to the system.
+    // Samurai Shodown's fighter-select program gives the stage background and
+    // the screen buffers to the fight program it starts, then exits: without
+    // this they were freed with it and the fight drew from reused memory
+    // (black background, dark fighters). MEMC_NOWRITE / OKWRITE change write
+    // protection, which the runtime doesn't model.
+    K(kControlMem, "ControlMem", [this](Cpu*) {
+        const uint32_t p = arg(0), size = arg(1), cmd = arg(2);
+        const int32_t to = int32_t(arg(3));
+        if (cmd == 3 && size && !std::getenv("TDORT_OLD_CONTROLMEM")) {
+            int32_t owner = 0;
+            if (to) {
+                HleTask* t = task_by_item(to);
+                if (!t) { c.r[0] = uint32_t(kErrBadItem); return; }
+                owner = owning_task(*t);
+            }
+            std::vector<uint32_t> hit;
+            for (auto& [a, sz] : allocs_)
+                if (a < p + size && a + sz > p) hit.push_back(a);
+            for (uint32_t a : hit) {
+                if (owner) alloc_owner_[a] = owner;
+                else if (a >= p && a + allocs_[a] <= p + size) free_mem(a);   // whole blocks back to the system
+            }
+            rt.log("ControlMem: %s %08X+%X (%zu block(s))", owner ? "gave" : "returned", p, size, hit.size());
+        }
+        c.r[0] = 0;
+    });
     K(kSystemScavengeMem, "SystemScavengeMem", [this](Cpu*) { c.r[0] = 0; });
 
     // --- messages

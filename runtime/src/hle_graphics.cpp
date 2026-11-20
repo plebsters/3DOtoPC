@@ -77,7 +77,14 @@ int32_t Portfolio::display_screen(int32_t s0, int32_t /*s1: odd field, same imag
     if (!scr || scr->kind != ItemKind::Screen || scr->children.empty()) return kErrBadItem;
     // A display list set with SetVDL decides which memory the screen shows.
     if (auto v = screen_vdl_buffer_.find(s0); v != screen_vdl_buffer_.end()) rt.gfx->set_display_buffer(v->second);
-    else if (HleItem* bm = item(scr->children[0])) rt.gfx->set_display_buffer(r32(bm->addr + bitmap::Buffer));
+    else if (HleItem* bm = item(scr->children[0])) {
+        // A screen shows as many lines as its bitmap has; a 200-line screen
+        // (Doom) leaves the bottom 40 lines black instead of showing the start
+        // of whatever lies after it in memory (TDORT_FULL_DISPLAY=1: always 240).
+        static const bool full = std::getenv("TDORT_FULL_DISPLAY") != nullptr;
+        const int32_t h = int32_t(r32(bm->addr + bitmap::Height));
+        rt.gfx->set_display_buffer(r32(bm->addr + bitmap::Buffer), (full || h <= 0 || h > Gfx::kHeight) ? Gfx::kHeight : h);
+    }
     if (std::getenv("TDORT_DEBUG_DISPLAY")) {
         HleItem* bm = item(scr->children[0]);
         rt.log("DisplayScreen(%d): showing %08X (bitmap %d buffer %08X)", s0, rt.gfx->display_buffer(),
@@ -105,8 +112,8 @@ int32_t Portfolio::draw_cels(int32_t bitmap_item, uint32_t ccb) {
     if (std::getenv("TDORT_DEBUG_DISPLAY")) rt.log("DrawCels(bitmap %d -> buffer %08X, ccb %08X)", bitmap_item, t.buffer, ccb);
     static const bool cel_trace = std::getenv("TDORT_CEL_TRACE") != nullptr;
     if (cel_trace)
-        std::fprintf(stderr, "DrawCels bitmap %d buffer %08X %dx%d clip %d,%d %dx%d (frame %u)\n", bitmap_item, t.buffer,
-                     t.width, t.height, t.clip_x, t.clip_y, t.clip_w, t.clip_h, frame_no_);
+        std::fprintf(stderr, "DrawCels bitmap %d buffer %08X %dx%d clip %d,%d %dx%d ccb %08X lr %08X (frame %u)\n", bitmap_item, t.buffer,
+                     t.width, t.height, t.clip_x, t.clip_y, t.clip_w, t.clip_h, ccb, c.r[14], frame_no_);
     const uint64_t px0 = rt.gfx->pixels_written, cels0 = rt.gfx->cels_drawn;
     rt.gfx->draw_cels(t, ccb);
     // DrawCels waits for the cel engine, and the engine holds the memory bus

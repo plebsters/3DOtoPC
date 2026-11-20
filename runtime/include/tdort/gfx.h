@@ -21,7 +21,10 @@ public:
 
     explicit Gfx(Memory& mem) : mem_(mem), frame_(kWidth * kHeight, 0) {}
 
-    void set_display_buffer(uint32_t addr) { display_addr_ = addr; }
+    // lines: how many lines of the screen the display shows (its bitmap's
+    // height); the lines below stay black, as on the console.
+    void set_display_buffer(uint32_t addr, int lines = kHeight) { display_addr_ = addr; display_lines_ = lines; }
+    int display_lines() const { return display_lines_; }
     uint32_t display_buffer() const { return display_addr_; }
 
     // Convert the guest framebuffer to XRGB8888.
@@ -56,6 +59,7 @@ private:
 
     Memory& mem_;
     std::vector<uint32_t> frame_;
+    int      display_lines_ = kHeight;
     uint32_t display_addr_ = 0;
 };
 

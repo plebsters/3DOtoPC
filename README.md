@@ -420,6 +420,16 @@ Fixes found by running games (each a difference from the real OS):
   clears the pending answers, the start ran twice and failed, and the opening was dropped.
   Asynchronous disc reads now take as long as on a 2x CD drive (about 5 KB a frame, one
   request at a time); `TDORT_CD_SPEED=<bytes per frame>` changes it, `0` makes reads instant.
+* Doom: its game screens are 320x200. The display always showed 240 lines from the screen's
+  buffer, so the bottom 40 lines were the start of the next buffer in memory (the top of
+  the view again, under the status bar). A screen now shows as many lines as its bitmap
+  has, at the top, with black below. `TDORT_FULL_DISPLAY=1` brings back the old behaviour.
+* Samurai Shodown: the fighter-select program loads the stage background and makes the
+  screens, starts the fight program, gives it those blocks with `ControlMem(..., MEMC_GIVE,
+  task)` and exits. `ControlMem` did nothing, so the blocks were freed with the select
+  program and the fight program's own data was loaded over them: no background, and fighters
+  drawn dark. `MEMC_GIVE` now hands the memory to the other task (or, with task 0, back to
+  the system). `TDORT_OLD_CONTROLMEM=1` brings back the old behaviour.
 * Wolfenstein 3D: the game calls `SetClipWidth(bitmap, 0)` before drawing its 3D view. The
   graphics folio refuses a clip window that doesn't fit the bitmap (`GRAFERR_BADCLIP`) and
   leaves the clip as it was; the runtime clamped it to 1 pixel, so only the leftmost column

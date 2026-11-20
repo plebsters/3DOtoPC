@@ -42,9 +42,11 @@ static inline uint32_t rgb555_to_xrgb(uint32_t p) {
 const uint32_t* Gfx::scan_out() {
     if (display_addr_ == 0 || display_addr_ >= kRamEnd) return frame_.data();
     const uint8_t* src = &mem_.ram[display_addr_];
-    const uint32_t bytes = kWidth * kHeight * 2;
+    const int lines = std::clamp(display_lines_, 1, int(kHeight));
+    const uint32_t bytes = kWidth * uint32_t(lines) * 2;
     if (display_addr_ > kRamEnd - bytes) return frame_.data();
-    for (int y = 0; y < kHeight; ++y) {
+    std::fill(frame_.begin() + lines * kWidth, frame_.end(), 0u);
+    for (int y = 0; y < lines; ++y) {
         for (int x = 0; x < kWidth; ++x) {
             uint32_t pix;
             if (lrform) {
