@@ -333,6 +333,7 @@ private:
     std::deque<HleItem> items_;
     std::map<std::string, int> stub_counts_;
     std::map<uint32_t, uint32_t> free_dram_, free_vram_, allocs_;
+    bool quiet_alloc_ = false;                    // an allocation with a fallback: don't log a failure
     std::map<uint32_t, int32_t> alloc_owner_;     // allocation -> item of the task that owns it (threads: their owner)
     int32_t owning_task(const HleTask& t);        // the task a thread belongs to, or the task itself
     void free_task_memory(int32_t owner);         // everything a task owned, when it ends

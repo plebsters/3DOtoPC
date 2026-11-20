@@ -361,7 +361,20 @@ void Portfolio::install_file() {
         if (exists) {
             std::string why;
             int32_t t = start_program(cmd, host, prio, why);
-            if (t > 0) { c.r[0] = uint32_t(t); return; }
+            if (t > 0) {
+                // LoadProgram starts the program in the directory its file is
+                // in (FILETASK_TAG_CURRENTDIRECTORY), not its creator's.
+                // Lemmings changes to /CD-ROM/LemmingsData, then starts its
+                // movie players from the disc's root folder, which open
+                // LogoEA.str and Intro.Film there by bare name.
+                if (!std::getenv("TDORT_OLD_PROGRAM_CWD"))
+                    if (HleTask* nt = task_by_item(t)) {
+                        const size_t slash = norm.find_last_of('/');
+                        nt->cwd = (slash == std::string::npos || slash == 0) ? std::string() : norm.substr(0, slash);
+                    }
+                c.r[0] = uint32_t(t);
+                return;
+            }
             rt.log("%s(\"%s\"): cannot run it here (%s)", fn, cmd.c_str(), why.c_str());
         }
         rt.log("%s(\"%s\", %d): %s; not run, reported as finished", fn, cmd.c_str(), prio,

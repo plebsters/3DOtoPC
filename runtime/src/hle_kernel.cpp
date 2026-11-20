@@ -117,7 +117,12 @@ HleItem& Portfolio::new_item(ItemKind k, uint8_t subsys, uint8_t type, uint32_t 
     it.num = int32_t(items_.size());
     it.kind = k; it.subsys = subsys; it.type = type; it.name = name;
     it.size = std::max<uint32_t>(struct_size, node::ItemNodeSize);
+    // Item structures come from the game's memory, as on the console; when
+    // that is full they go in the runtime's own area instead (no failure to
+    // report: Road Rash fills its memory and keeps creating items).
+    quiet_alloc_ = true;
     it.addr = from_game_heap ? alloc(it.size, kMemFromTop) : rt.hle_alloc(it.size);
+    quiet_alloc_ = false;
     if (!it.addr) it.addr = rt.hle_alloc(it.size);
     // Item structures are the system's, not the creating task's: a device made
     // on first lookup by a short-lived program (Gex's movie player opens "mac")
@@ -250,6 +255,21 @@ void Portfolio::update_free_page_bits() {
             const uint32_t first = (a - base + 2047) / 2048, end = (a + sz - base) / 2048;
             for (uint32_t p = first; p < end && p < words * 32; ++p) w[p / 32] |= 1u << (p % 32);
         }
+        // On the console the OS itself fills a few hundred KB of DRAM, out of
+        // the game's sight; here its structures live elsewhere. Free pages at
+        // the top of DRAM, up to a reserve, are left out of what games are
+        // told is free (they stay allocatable). Road Rash takes all the
+        // memory it is told about but 36 KB, then its track loader needed
+        // more and every thread deadlocked on "Game Loading".
+        if (mh == memhdr_dram_) {
+            static const uint32_t reserve_pages = [] {
+                const char* e = std::getenv("TDORT_OS_RESERVE_KB");
+                return (e ? uint32_t(std::strtoul(e, nullptr, 10)) : 128u) / 2;
+            }();
+            uint32_t hidden = 0;
+            for (int32_t p = int32_t(words * 32) - 1; p >= 0 && hidden < reserve_pages; --p)
+                if (w[p / 32] & (1u << (p % 32))) { w[p / 32] &= ~(1u << (p % 32)); ++hidden; }
+        }
         for (uint32_t i = 0; i < words; ++i) w32(bits + i * 4, w[i]);
     };
     fill(memhdr_dram_, free_dram_);
@@ -281,12 +301,14 @@ uint32_t Portfolio::alloc(uint32_t size, uint32_t flags) {
     };
     if (flags & kMemVram) a = pick(free_vram_, sz);
     else if (!(a = pick(free_dram_, sz))) a = pick(free_vram_, sz);   // 3DO memory is unified enough
-    if (!a) { rt.log("AllocMem(%u, %08X) failed: out of memory", size, flags); return 0; }
+    if (!a) { if (!quiet_alloc_) rt.log("AllocMem(%u, %08X) failed: out of memory", size, flags); return 0; }
     allocs_[a] = sz;
     update_free_page_bits();
     if (!tasks_.empty()) alloc_owner_[a] = owning_task(cur());
-    static const bool mem_trace = std::getenv("TDORT_MEM_TRACE") != nullptr;
-    if (mem_trace && sz >= 1024)
+    static const char* mem_trace_env = std::getenv("TDORT_MEM_TRACE");
+    static const bool mem_trace = mem_trace_env != nullptr;
+    static const uint32_t mem_trace_min = mem_trace_env && std::string(mem_trace_env) == "all" ? 0u : 1024u;   // TDORT_MEM_TRACE=all: every size
+    if (mem_trace && sz >= mem_trace_min)
         rt.log("alloc %u (%08X) -> %08X by \"%s\" lr=%08X", sz, flags, a, cur().name.c_str(), c.r[14]);
     std::vector<uint8_t> fill(sz, (flags & kMemFill) ? uint8_t(flags & kMemFillMask) : 0);
     rt.mem.write_block(a, fill.data(), sz);
@@ -296,8 +318,10 @@ uint32_t Portfolio::alloc(uint32_t size, uint32_t flags) {
 void Portfolio::free_mem(uint32_t a) {
     auto it = allocs_.find(a);
     if (it == allocs_.end()) { if (a) rt.log("FreeMem(%08X): not an allocation, ignored", a); return; }
-    static const bool mem_trace = std::getenv("TDORT_MEM_TRACE") != nullptr;
-    if (mem_trace && it->second >= 1024) rt.log("free %08X (%u) by \"%s\" lr=%08X", a, it->second, cur().name.c_str(), c.r[14]);
+    static const char* mem_trace_env = std::getenv("TDORT_MEM_TRACE");
+    static const bool mem_trace = mem_trace_env != nullptr;
+    static const uint32_t mem_trace_min = mem_trace_env && std::string(mem_trace_env) == "all" ? 0u : 1024u;
+    if (mem_trace && it->second >= mem_trace_min) rt.log("free %08X (%u) by \"%s\" lr=%08X", a, it->second, cur().name.c_str(), c.r[14]);
     give(a >= kVramBase ? free_vram_ : free_dram_, it->first, it->second);
     allocs_.erase(it);
     alloc_owner_.erase(a);
@@ -758,6 +782,37 @@ void Portfolio::install_kernel_vectors() {
     memhdr_dram_ = make_mh(kDramBase, kDramSize, kMemTypesDram, "DRAM");
     memhdr_vram_ = make_mh(kVramBase, kVramSize, kMemTypesVram, "VRAM");
     update_free_page_bits();
+
+    // Free-memory lists: the kernel's (kb_MemFreeLists) and the task's
+    // (t_FreeMemoryLists) hold one MemList per memory bank, each pointing at
+    // the bank's MemHdr. Road Rash's own allocator walks the kernel's list to
+    // learn which bank an address belongs to; with the lists empty it followed
+    // a null pointer and looped forever at start-up.
+    // MemList: Node (20 bytes), Types +20, OwnBits +24, WriteBits +28,
+    // MemHdr +32, l +36, Sema4 +40, OwnBitsSize +44, AlignedTrackSize +48.
+    auto make_ml = [&](uint32_t list, uint32_t mh, const char* name) {
+        const uint32_t ml = rt.hle_alloc(52);
+        w8(ml + node::SubsysType, kSubsysKernel);
+        w8(ml + node::Type, 4 /*MEMLISTNODE*/);
+        w32(ml + node::Size, 52);
+        w32(ml + node::Name, guest_string(name));
+        w32(ml + 20, r32(mh + memhdr::Types));
+        const uint32_t words = r8(mh + memhdr::FreePageBitsSize);
+        w32(ml + 24, rt.hle_alloc(words * 4));      // pages owned: none yet
+        w32(ml + 28, rt.hle_alloc(words * 4));      // pages writable
+        w32(ml + 32, mh);
+        w32(ml + 36, list);
+        w8(ml + 44, uint8_t(words));
+        list_add_tail(list, ml);
+    };
+    if (!std::getenv("TDORT_OLD_MEMLISTS")) {
+        const uint32_t kl = r32(kbase_ + kbase::MemFreeLists);
+        make_ml(kl, memhdr_dram_, "system dram ml");
+        make_ml(kl, memhdr_vram_, "system vram ml");
+        const uint32_t tl = r32(cur().addr + task::FreeMemoryLists);
+        make_ml(tl, memhdr_vram_, "task vram ml");
+        make_ml(tl, memhdr_dram_, "task dram ml");
+    }
     (void)kitem;
 }
 
@@ -867,6 +922,13 @@ void Portfolio::install_kernel_swis() {
         if (!it) { c.r[0] = uint32_t(kErrBadItem); return; }
         uint8_t old = r8(it->addr + node::Priority);
         w8(it->addr + node::Priority, uint8_t(arg(1)));
+        // A task's priority is also the scheduler's: Need for Speed lowers its
+        // main task to 80, starts a thread at 92 and spins until that thread
+        // has run. Only the item's copy changed before, so the main task kept
+        // 100 and the thread never ran (black screen from frame 4). A higher-
+        // priority ready task now takes over at the next check (preempt()).
+        if (it->kind == ItemKind::Task && !std::getenv("TDORT_OLD_SETPRI"))
+            if (HleTask* t = task_by_item(it->num)) t->pri = uint8_t(arg(1));
         c.r[0] = old;
     });
     // SetItemOwner(item, task): the item now belongs to that task, so it is

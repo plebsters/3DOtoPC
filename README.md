@@ -322,7 +322,7 @@ Environment variables:
 | `TDORT_WAV=file.wav` | headless: record the sound |
 | `TDORT_TRACE_ALL=1` | with `--trace`: also log repeated identical calls |
 | `TDORT_TRACE_READS=1` | log every file read |
-| `TDORT_MEM_TRACE=1` | log every allocation and free |
+| `TDORT_MEM_TRACE=1` | log allocations and frees of 1 KB and more (`=all`: every size) |
 | `TDORT_WATCH=2AFA64` | log when that memory word changes (checked at each OS call) |
 | `TDORT_BREAK=3C6C8,2C27C` | log the frame, the registers and 8 words at the stack each time code reaches one of those addresses |
 | `TDORT_BREAK_DUMP=2ABE20` | with `TDORT_BREAK`, also log 32 words at that address (or `r4`: at the address in that register) |
@@ -333,6 +333,7 @@ Environment variables:
 | `TDORT_AUDIO_STATUS=1` | keep the status line going past 60 s, with the active voices |
 | `TDORT_SPEED_TRACE=1` | every 2 s: how many frames used all the CPU, and the average CPU load |
 | `TDORT_TIMING=old` | old speed model: one clock per instruction and free drawing (games get about twice the CPU) |
+| `TDORT_OS_RESERVE_KB=128` | DRAM left out of the free memory games are told about (default 128) |
 | `TDORT_CEL_TRACE=1` | log every cel drawn, each `DrawCels` target (bitmap, size, clip) and each clip change, to stderr |
 | `TDORT_CEL_CYCLES=0.5` | CPU clocks lost per pixel the cel engine draws (default 0.5; 0 = drawing is free) |
 | `TDORT_N_CLOCKS=2` | clocks per non-sequential memory access (default 2, from the datasheet; 1 = faster memory, games get more CPU) |
@@ -420,6 +421,23 @@ Fixes found by running games (each a difference from the real OS):
   clears the pending answers, the start ran twice and failed, and the opening was dropped.
   Asynchronous disc reads now take as long as on a 2x CD drive (about 5 KB a frame, one
   request at a time); `TDORT_CD_SPEED=<bytes per frame>` changes it, `0` makes reads instant.
+* Road Rash: its own memory manager walks the kernel's free-memory lists (`kb_MemFreeLists`)
+  to find which bank an address is in; the lists were empty, so it read through address 0
+  and looped at start-up. The kernel's and the task's lists now hold one `MemList` per bank.
+  It then took all the memory it was told was free but 36 KB, and its track loader ran out
+  ("Game Loading", then a deadlock): the console's OS fills a few hundred KB of DRAM that the
+  runtime keeps elsewhere, so 128 KB at the top of DRAM is now left out of the free-page
+  bits games read (`TDORT_OS_RESERVE_KB`; still allocatable). `TDORT_OLD_MEMLISTS=1` empties
+  the lists again.
+* Need for Speed / OverDrivin': the main task lowers itself to priority 80 with `SetItemPri`,
+  starts its controller thread at 92 and spins until that thread has run. `SetItemPri`
+  changed only the item's copy of the priority, not the scheduler's, so the thread never ran
+  (black screen). `TDORT_OLD_SETPRI=1` brings back the old behaviour.
+* Lemmings: a program started with `LoadProgram` begins in the folder its file is in, as
+  the file folio does (`FILETASK_TAG_CURRENTDIRECTORY`), not in its creator's current
+  directory. Lemmings changes to `/CD-ROM/LemmingsData`, then starts its movie players from
+  the disc's top folder, which open `LogoEA.str` and `Intro.Film` there by name.
+  `TDORT_OLD_PROGRAM_CWD=1` brings back the old behaviour.
 * Doom: its game screens are 320x200. The display always showed 240 lines from the screen's
   buffer, so the bottom 40 lines were the start of the next buffer in memory (the top of
   the view again, under the status bar). A screen now shows as many lines as its bitmap
