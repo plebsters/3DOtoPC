@@ -16,6 +16,7 @@ struct CelTarget {
 };
 
 class Gfx {
+    friend struct StateIO;   // savestate.cpp
 public:
     static constexpr int kWidth = 320, kHeight = 240;
 

@@ -279,6 +279,38 @@ once with its arguments, so the log is the to-do list for that game.
 
 An Xbox controller works too (XInput).
 
+### Save states
+
+| Key | Does |
+|---|---|
+| F5 | Save the game exactly where it is, into the current slot |
+| F6 | Load the current slot |
+| F3 | Choose the slot (1 to 9; the message shows which) |
+
+A save state is the whole machine at that moment (memory, the game's tasks, open files,
+sound, timers), so it works in any game at any point, not only where the game lets you save.
+States are files in a `savestates` folder next to the game (`slot1.state` ... `slot9.state`,
+about 4 MB each). A state only loads into the same converted game: after re-converting a
+game, older states are refused ("made by another game or conversion") because the
+translated code may differ. The game's own saves (NVRAM) are separate and still work as before.
+For testing without a window: `TDORT_STATE_SAVE=<frame>:<slot>` and `TDORT_STATE_LOAD=<frame>:<slot>`.
+
+### Display options (change them while playing)
+
+| Key | Does |
+|---|---|
+| F1 | Shows the keys (display and save states) on screen |
+| F7 | Window size: 2x, 3x, 4x, 5x, 6x (640x480 up to 1920x1440; limited to what fits the screen) |
+| F8 | Picture shape: **4:3** (black bars), **Pixel perfect** (4:3 at a whole-number size, so every pixel is the same size), **Stretch** to the window |
+| F9 | Look: **Sharp** pixels, **Smooth** (filtered), **Scanlines** (CRT-style dark lines; best at 3x or more) |
+| F11 or Alt+Enter | Fullscreen on and off (a borderless window over the whole monitor, so switching is instant) |
+
+A short message in a rounded panel at the top left confirms each change (F1 lists every key). The settings are kept in
+`%APPDATA%\3DO to PC\display.cfg` and apply to every converted game; delete the file to go
+back to the defaults (3x window, 4:3, sharp). You can also drag the window to any size: the
+picture keeps its shape. This only changes how the 320x240 picture is shown; games still
+draw at the 3DO's resolution.
+
 ## Diagnosis report
 
 Every run writes **`tdort_report.txt`** next to the game's `.exe` when it ends (window
@@ -338,6 +370,7 @@ Environment variables:
 | `TDORT_OLD_STREAM_DECODE=1` | each streamed SDX2/ADPCM buffer starts its decoder from zero |
 | `TDORT_OLD_MATH=1` | `multiply.dsp` and the other arithmetic instruments add their inputs, as before |
 | `TDORT_PRE0_BGND=1` | a cel's preamble BGND bit also keeps its 000 pixels opaque (old behaviour) |
+| `TDORT_OLD_DEFINE_SAMPLE=1` | `DefineSampleHere` plays the sound from the file image instead of a copy |
 | `TDORT_CEL_TRACE=1` | log every cel drawn, each `DrawCels` target (bitmap, size, clip) and each clip change, to stderr |
 | `TDORT_CEL_CYCLES=0.5` | CPU clocks lost per pixel the cel engine draws (default 0.5; 0 = drawing is free) |
 | `TDORT_N_CLOCKS=2` | clocks per non-sequential memory access (default 2, from the datasheet; 1 = faster memory, games get more CPU) |
@@ -464,6 +497,13 @@ Fixes found by running games (each a difference from the real OS):
   mean "000 pixels are opaque". The cel engine only goes by the CCB's BGND flag (Opera, the
   reference 3DO emulator, never tests the preamble bit), so 000 pixels of these cels are
   now transparent. `TDORT_PRE0_BGND=1` brings back the old behaviour.
+* Need for Speed: static and clicks while driving. The game loads each sound family (engine,
+  collisions) into a scratch buffer, defines its samples with `DefineSampleHere`, then
+  reuses the buffer for car data. The folio copies a sample's sound out of the image (into
+  memory from the caller's alloc function); the runtime played it from the image, so once
+  the buffer was reused the engine played whatever was written over it (a click at every
+  loop, about four a second). `DefineSampleHere` now copies the sound, as `CreateSample`
+  with an image already did (`TDORT_OLD_DEFINE_SAMPLE=1`: play it from the image).
 * Doom: its game screens are 320x200. The display always showed 240 lines from the screen's
   buffer, so the bottom 40 lines were the start of the next buffer in memory (the top of
   the view again, under the status bar). A screen now shows as many lines as its bitmap

@@ -23,6 +23,7 @@ add_library(tdort STATIC
     src/gfx.cpp
     src/audio.cpp
     src/hle_audio.cpp
+    src/savestate.cpp
     src/platform_null.cpp
     src/platform_win32.cpp
 )

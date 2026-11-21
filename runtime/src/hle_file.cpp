@@ -525,7 +525,7 @@ void Portfolio::install_file() {
         w32(st + kStBlockSize, kBlock);
         w32(st + kStBlockCount, uint32_t((size + kBlock - 1) / kBlock));
         w32(st + kStFileLength, uint32_t(size));
-        streams_[st] = {fp, uint32_t(size), 0};
+        streams_[st] = {fp, uint32_t(size), 0, host};
         rt.log("OpenDiskStream(\"%s\") -> %08X (%ld bytes)", path.c_str(), st, size);
         c.r[0] = st;
     };

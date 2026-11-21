@@ -22,6 +22,7 @@ namespace tdort {
 struct Memory;
 
 class Audio {
+    friend struct StateIO;   // savestate.cpp
 public:
     static constexpr int kRate = 44100;
     explicit Audio(Memory& mem) : mem_(mem) {}

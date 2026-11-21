@@ -13,6 +13,7 @@
 // routine that calls the CompFunc for every word produced and then returns
 // to the game with the call's result.
 #include "hle_os.h"
+#include "state_ar.h"
 
 #include <algorithm>
 #include <array>
@@ -46,6 +47,22 @@ struct Portfolio::Codec {
     std::vector<int32_t> head, prev;         // hash chains over window positions
     uint64_t obits = 0; uint32_t onbits = 0; // output bits not yet a full word
 };
+
+// Save states: every open compressor and decompressor, with its window.
+void Portfolio::codecs_io(StateAr& a) {
+    size_t n = a.count(codecs_.size());
+    std::vector<uint32_t> keys;
+    if (a.saving) for (auto& kv : codecs_) keys.push_back(kv.first);
+    else { codecs_.clear(); keys.assign(n, 0); }
+    for (size_t i = 0; i < keys.size() && !a.bad; ++i) {
+        a(keys[i]);
+        std::shared_ptr<Codec>& d = codecs_[keys[i]];
+        if (!d) d = std::make_shared<Codec>();
+        a(d->compress); a(d->cf); a(d->user); a(d->own_handle); a(d->out_buf); a(d->out_cap);
+        a(d->window); a(d->pos); a(d->bits); a(d->nbits); a(d->word); a(d->bytes_left);
+        a(d->ended); a(d->data_after_end); a(d->pending); a(d->head); a(d->prev); a(d->obits); a(d->onbits);
+    }
+}
 
 void Portfolio::codec_emit_byte(Codec& d, uint8_t c, std::vector<uint32_t>& out) {
     if (d.bytes_left == 0) { out.push_back(d.word); d.word = c; d.bytes_left = 3; }

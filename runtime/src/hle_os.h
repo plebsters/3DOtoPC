@@ -86,7 +86,9 @@ struct HleTask {
     std::deque<CallRec> calls;      // its last OS calls (repeats counted)
 };
 
+struct StateAr;
 class Portfolio {
+    friend struct StateIO;   // savestate.cpp
 public:
     Portfolio(Runtime& rt, const AifImage& img);
     ~Portfolio();
@@ -122,6 +124,7 @@ public:
     // Compression folio (hle_compress.cpp)
     struct Codec;
     std::map<uint32_t, std::shared_ptr<Codec>> codecs_;   // by Compressor/Decompressor handle
+    void     codecs_io(StateAr& a);                // save states (hle_compress.cpp)
     uint32_t deliver_code_ = 0, final_word_ = 0;
     void     install_compression();
     void     install_jstring();
@@ -218,7 +221,7 @@ private:
     std::map<int32_t, uint32_t> vdl_buffer_;          // VDL item -> frame buffer it shows
     std::map<int32_t, int32_t>  screen_vdl_;          // screen -> VDL set on it
     std::map<int32_t, uint32_t> screen_vdl_buffer_;   // screen -> frame buffer from its VDL
-    struct DiskStream { FILE* fp; uint32_t size, pos; };
+    struct DiskStream { FILE* fp; uint32_t size, pos; std::string path; };
     struct DirList { std::vector<std::string> entries; size_t next; };
     std::map<uint32_t, DirList> dirs_;                              // OpenDirectory*: guest Directory* -> listing
     void fill_dir_entry(const std::string& host, uint32_t index, uint8_t* e);
@@ -325,6 +328,7 @@ private:
     std::map<int32_t, int32_t> broker_dest_;      // event message -> listener port it was sent to
     void    drop_dead_listeners();
     uint32_t last_pad_ = 0, frame_no_ = 0;
+    uint32_t hw_random_ = 0x3D0C0DE5;             // ReadHardwareRandomNumber's generator
 
     // graphics
     int32_t create_screen_group(uint32_t screen_items_out, uint32_t tags);
