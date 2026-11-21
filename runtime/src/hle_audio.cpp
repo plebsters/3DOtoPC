@@ -240,6 +240,13 @@ int32_t Portfolio::load_sample(const std::string& path, bool scan_only, uint32_t
     } else { s.addr = 0; s.bytes = 0; }
     const int32_t item = audio_new(kAuSample, path);
     rt.audio->add_sample(item, s);
+    // The file comes off the disc, so the caller waits for the drive, as for
+    // any synchronous read. Return Fire's music thread fades only when time
+    // has passed since its last pass, and Choose loads its sounds between
+    // starting the music and fading it out; done at once, both fell in the
+    // same frame and the fade (which Choose waits for) never began. The
+    // caller waits after its result is set (see the LoadSample vectors).
+    last_load_bytes_ = uint32_t(off + keep);
     rt.log("LoadSample(\"%s\") -> %d: %d ch, %d bits%s, %.0f Hz, %u frames%s", path.c_str(), item, s.channels, s.bits,
            s.codec == Audio::Codec::Sdx2 ? " SDX2" : s.codec == Audio::Codec::Adp4 ? " ADP4" : "", s.rate, s.frames,
            s.sus_end > s.sus_begin ? ", looped" : "");
@@ -463,9 +470,9 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
     };
 
     // ---- samples
-    av[-3]  = [this](Cpu*) { c.r[0] = uint32_t(load_sample(rstr(arg(0)), false, 0)); };     // LoadSample
-    av[-38] = [this](Cpu*) { c.r[0] = uint32_t(load_sample(rstr(arg(0)), false, 0)); };     // LoadSampleHere
-    av[-12] = [this](Cpu*) { c.r[0] = uint32_t(load_sample(rstr(arg(0)), true, arg(1))); }; // ScanSample(name, bufsize)
+    av[-3]  = [this](Cpu*) { last_load_bytes_ = 0; const std::string n = rstr(arg(0)); c.r[0] = uint32_t(load_sample(n, false, 0)); if (last_load_bytes_) cd_load_wait(last_load_bytes_, n); };     // LoadSample
+    av[-38] = [this](Cpu*) { last_load_bytes_ = 0; const std::string n = rstr(arg(0)); c.r[0] = uint32_t(load_sample(n, false, 0)); if (last_load_bytes_) cd_load_wait(last_load_bytes_, n); };     // LoadSampleHere
+    av[-12] = [this](Cpu*) { last_load_bytes_ = 0; const std::string n = rstr(arg(0)); c.r[0] = uint32_t(load_sample(n, true, arg(1))); if (last_load_bytes_) cd_load_wait(last_load_bytes_, n); }; // ScanSample(name, bufsize)
     av[-41] = [this](Cpu*) {                                 // DefineSampleHere(image, numbytes, alloc, free)
         const uint32_t img = arg(0), nb = arg(1);
         if (!guest_range_ok(img, nb)) { c.r[0] = uint32_t(kErrBadPtr); return; }

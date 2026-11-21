@@ -130,7 +130,12 @@ Gfx::Pixel Gfx::decode(uint32_t raw, int bpp, bool uncoded) const {
     case 3: p.pmode = 1; break;
     default: break;
     }
-    p.transparent = p.color == 0 && !(r_.pre0 & kPre0Bgnd) && !(flags & kBgnd);
+    // Only the CCB's BGND flag keeps 000 pixels opaque: the cel engine does not
+    // test the preamble's BGND bit (Opera, the reference emulator, never does).
+    // Return Fire sets that bit on its bushes and tree shadows, which then
+    // drew their empty pixels as black boxes. TDORT_PRE0_BGND=1: honour it.
+    static const bool pre0_bgnd = std::getenv("TDORT_PRE0_BGND") != nullptr;
+    p.transparent = p.color == 0 && !(pre0_bgnd && (r_.pre0 & kPre0Bgnd)) && !(flags & kBgnd);
     return p;
 }
 

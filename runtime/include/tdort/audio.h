@@ -26,7 +26,7 @@ public:
     static constexpr int kRate = 44100;
     explicit Audio(Memory& mem) : mem_(mem) {}
 
-    enum class Kind { Sampler, Mixer, Output, Osc, Envelope, Effect };
+    enum class Kind { Sampler, Mixer, Output, Osc, Envelope, Effect, Math };
     // Duck: the Duck/Crystal Dynamics movie sound (adpcmduck22S.dsp). Stereo
     // IMA ADPCM, one byte per frame (high nibble left, low right), in blocks of
     // 1512 bytes: 0xF7 0x7F, the left and right step indexes, 1508 data bytes.
@@ -81,6 +81,9 @@ public:
         int      data_bits = 0;             // 0 = as the sample says
         bool     data_sdx2 = false, data_adp4 = false, data_duck = false;
         int      inputs = 0;
+        // Math (multiply.dsp, timesplus.dsp, subtract.dsp, add.dsp): Output from the
+        // InputA/B/C knobs, each driven by a connection or set by a tweak.
+        enum class Op { Mul, TimesPlus, Sub, Add } op = Op::Mul;
         std::map<std::string, int32_t> knobs;   // values as last tweaked
         std::map<std::string, int32_t> mod;     // knobs driven by another instrument's output (ConnectInstruments to a knob)
         double   env = 0;                       // envelope.dsp: current level

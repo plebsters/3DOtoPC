@@ -815,4 +815,24 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
     }
 }
 
+
+void Portfolio::cd_load_wait(uint32_t bytes, const std::string& what) {
+    static const uint32_t cd_bpf = [] {
+        const char* e = std::getenv("TDORT_CD_SPEED");
+        return e ? uint32_t(std::strtoul(e, nullptr, 10)) : 5120u;
+    }();
+    static const bool on = [] {
+        const char* e = std::getenv("TDORT_CD_SYNC"); if (e && e[0] == '0') return false;
+        return std::getenv("TDORT_OLD_LOADWAIT") == nullptr;
+    }();
+    if (!on || !cd_bpf || old_io() || !multitasking()) return;
+    const uint64_t now = uint64_t(frame_no_) * cd_bpf;
+    cd_free_pos_ = std::max(cd_free_pos_, now) + bytes;
+    if (cd_free_pos_ <= now + cd_bpf) return;               // finished within this frame
+    const uint32_t due = uint32_t((cd_free_pos_ + cd_bpf - 1) / cd_bpf);
+    static bool said = false;
+    if (!said) { said = true; rt.log("CD: loading %s (%u bytes) waits for the drive until frame %u (TDORT_OLD_LOADWAIT=1: no wait)", what.c_str(), bytes, due); }
+    sleep_until(due);
+}
+
 } // namespace tdort

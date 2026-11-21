@@ -334,6 +334,10 @@ Environment variables:
 | `TDORT_SPEED_TRACE=1` | every 2 s: how many frames used all the CPU, and the average CPU load |
 | `TDORT_TIMING=old` | old speed model: one clock per instruction and free drawing (games get about twice the CPU) |
 | `TDORT_OS_RESERVE_KB=128` | DRAM left out of the free memory games are told about (default 128) |
+| `TDORT_OLD_LOADWAIT=1` | `LoadSample` reads the disc instantly instead of waiting for the drive |
+| `TDORT_OLD_STREAM_DECODE=1` | each streamed SDX2/ADPCM buffer starts its decoder from zero |
+| `TDORT_OLD_MATH=1` | `multiply.dsp` and the other arithmetic instruments add their inputs, as before |
+| `TDORT_PRE0_BGND=1` | a cel's preamble BGND bit also keeps its 000 pixels opaque (old behaviour) |
 | `TDORT_CEL_TRACE=1` | log every cel drawn, each `DrawCels` target (bitmap, size, clip) and each clip change, to stderr |
 | `TDORT_CEL_CYCLES=0.5` | CPU clocks lost per pixel the cel engine draws (default 0.5; 0 = drawing is free) |
 | `TDORT_N_CLOCKS=2` | clocks per non-sequential memory access (default 2, from the datasheet; 1 = faster memory, games get more CPU) |
@@ -438,6 +442,28 @@ Fixes found by running games (each a difference from the real OS):
   directory. Lemmings changes to `/CD-ROM/LemmingsData`, then starts its movie players from
   the disc's top folder, which open `LogoEA.str` and `Intro.Film` there by name.
   `TDORT_OLD_PROGRAM_CWD=1` brings back the old behaviour.
+* Return Fire: the menu froze after the first button press. The menu program starts its
+  music thread's fade-out and waits until the volume reaches zero; the music thread only
+  steps the fade when the video field count has moved on since its last pass. Between
+  starting the music and fading it, the menu loads its two sound effects with
+  `LoadSample`, which read the disc instantly, so everything happened in one field and
+  the fade never began. `LoadSample` (and `LoadSampleHere`, `ScanSample`) now make the
+  caller wait for the drive like other synchronous disc reads (`TDORT_OLD_LOADWAIT=1`: no
+  wait; `TDORT_CD_SYNC=0` also turns it off).
+* Need for Speed sound: a streamed delta-coded sound (SDX2, ADPCM) restarted its decoder
+  from zero at each linked buffer, which put a step in the wave at every buffer change
+  (pops and crackle in the intro movie: 24 clicks in 12 seconds before, 4 after). The
+  decoder state now carries on into the linked buffer, as on the DSP, where it belongs to
+  the instrument (`TDORT_OLD_STREAM_DECODE=1`: reset). `multiply.dsp`, `timesplus.dsp`,
+  `subtract.dsp` and `add.dsp` now compute their output from their `InputA`/`InputB`/
+  `InputC` knobs (a connected instrument or a set value) instead of adding their inputs;
+  Need for Speed scales each engine voice's left and right level with `multiply.dsp`, so
+  the engines played at full level, unpanned (`TDORT_OLD_MATH=1`: the old sum).
+* Return Fire: bushes had black boxes around them and the palm trees' shadows were dark
+  rectangles. Their cels set the BGND bit in the preamble word, which the runtime took to
+  mean "000 pixels are opaque". The cel engine only goes by the CCB's BGND flag (Opera, the
+  reference 3DO emulator, never tests the preamble bit), so 000 pixels of these cels are
+  now transparent. `TDORT_PRE0_BGND=1` brings back the old behaviour.
 * Doom: its game screens are 320x200. The display always showed 240 lines from the screen's
   buffer, so the bottom 40 lines were the start of the next buffer in memory (the top of
   the view again, under the status bar). A screen now shows as many lines as its bitmap

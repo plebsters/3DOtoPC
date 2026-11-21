@@ -45,6 +45,8 @@ Audio::Kind Audio::classify(const std::string& tmpl, bool* fixed, bool* half, bo
     // video with it (see vpp_run). TDORT_NO_VPP=1: the old silent sampler.
     if (has(n, "ezflix") && std::getenv("TDORT_NO_VPP")) { *fixed = true; *half = true; return Kind::Sampler; }
     if (has(n, "envelope")) return Kind::Envelope;
+    if (!std::getenv("TDORT_OLD_MATH") && (n == "multiply" || n == "timesplus" || n == "subtract" || n == "add"))
+        return Kind::Math;
     if (has(n, "saw") || has(n, "triangle") || has(n, "pulse") || has(n, "square") || has(n, "noise") ||
         has(n, "sine") || has(n, "osc"))
         return Kind::Osc;
@@ -56,6 +58,8 @@ std::vector<std::string> Audio::knob_names(const std::string& tmpl) {
     switch (classify(tmpl, &f, &h, &s, &in)) {
     case Kind::Sampler: return f ? std::vector<std::string>{"Amplitude"} : std::vector<std::string>{"Frequency", "Amplitude"};
     case Kind::Osc:     return {"Frequency", "Amplitude"};
+    case Kind::Math:    return base_name(tmpl) == "timesplus" ? std::vector<std::string>{"InputA", "InputB", "InputC"}
+                                                               : std::vector<std::string>{"InputA", "InputB"};
     case Kind::Mixer: {
         std::vector<std::string> k;
         for (int i = 0; i < in; ++i) {
@@ -81,6 +85,9 @@ void Audio::add_instrument(int32_t item, const std::string& tmpl_name) {
     Instrument in;
     in.tmpl = base_name(tmpl_name);
     in.kind = classify(tmpl_name, &in.fixed_rate, &in.half_rate, &in.stereo, &in.inputs);
+    if (in.kind == Kind::Math)
+        in.op = in.tmpl == "timesplus" ? Instrument::Op::TimesPlus : in.tmpl == "subtract" ? Instrument::Op::Sub
+              : in.tmpl == "add" ? Instrument::Op::Add : Instrument::Op::Mul;
     // TDORT_EZFLIX_SILENT=1: the old behaviour (EZFlix movie sound muted).
     in.silent = has(base_name(tmpl_name), "ezflix");
     if ((has(in.tmpl, "vpp") || has(in.tmpl, "ezflix")) && !std::getenv("TDORT_NO_VPP")) {
@@ -391,6 +398,16 @@ void Audio::attachment_ended(int32_t id, Attachment& a, Instrument& in) {
         const double carry = 0;
         reset_play(*n);
         n->pos += carry;
+        // The DSP's decoder keeps its state in the instrument, not in the
+        // sample: a delta-coded stream (SDX2, ADPCM) carries on from the last
+        // value into the linked buffer. Starting each buffer from zero put a
+        // step at every buffer change, heard as pops and crackle (Need for
+        // Speed's movie and menu music). TDORT_OLD_STREAM_DECODE=1: reset.
+        static const bool old_dec = std::getenv("TDORT_OLD_STREAM_DECODE") != nullptr;
+        if (!old_dec && n->ins == a.ins) {
+            n->dec_val[0] = a.dec_val[0]; n->dec_val[1] = a.dec_val[1];
+            n->adp_index[0] = a.adp_index[0]; n->adp_index[1] = a.adp_index[1];
+        }
     }
     if (a.flags & 2) stop(a.ins);
     (void)id; (void)in;
@@ -605,6 +622,42 @@ void Audio::eval(int32_t id, Instrument& in) {
             l = r = float(in.env / 32767.0);
         }
         break;
+    case Kind::Math: {
+        // A 4-quadrant fixed-point unit: each operand is the output of the
+        // instrument connected to that knob, or the knob's own value (signed,
+        // $7FFF = 1.0). multiply.dsp is a ring modulator (Output = A*B); Need
+        // for Speed scales each engine voice by a level this way. Summing the
+        // inputs instead played the voices unscaled and clipped into static.
+        float v[3][2];
+        const char* names[3] = {"InputA", "InputB", "InputC"};
+        for (int k = 0; k < 3; ++k) {
+            const float kv = float(int16_t(knob(in, names[k], 0) & 0xFFFF)) / 32767.0f;
+            v[k][0] = v[k][1] = kv;
+        }
+        for (const Conn& c : conns_) {
+            if (c.dst != id) continue;
+            int k = c.dst_port == "InputA" ? 0 : c.dst_port == "InputB" ? 1 : c.dst_port == "InputC" ? 2 : -1;
+            if (k < 0) continue;
+            auto it = ins_.find(c.src);
+            if (it == ins_.end()) continue;
+            eval(c.src, it->second);
+            const Instrument& s = it->second;
+            if (has(c.src_port, "Left")) v[k][0] = v[k][1] = s.out_l;
+            else if (has(c.src_port, "Right")) v[k][0] = v[k][1] = s.out_r;
+            else { v[k][0] = s.out_l; v[k][1] = s.out_r; }
+        }
+        for (int ch = 0; ch < 2; ++ch) {
+            float o;
+            switch (in.op) {
+            case Instrument::Op::TimesPlus: o = v[0][ch] * v[1][ch] + v[2][ch]; break;
+            case Instrument::Op::Sub:       o = v[0][ch] - v[1][ch]; break;
+            case Instrument::Op::Add:       o = v[0][ch] + v[1][ch]; break;
+            default:                        o = v[0][ch] * v[1][ch]; break;
+            }
+            (ch ? r : l) = std::clamp(o, -1.0f, 1.0f);    // the DSP's arithmetic saturates
+        }
+        break;
+    }
     default:     // Mixer, Output, Effect: sum the inputs
         if (running || in.kind == Kind::Effect) {
             for (const Conn& c : conns_) {
