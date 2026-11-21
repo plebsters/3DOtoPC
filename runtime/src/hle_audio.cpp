@@ -480,7 +480,28 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
         if (!parse_aiff(&rt.mem.ram[img], nb, s, off, len, why)) {
             rt.log("DefineSampleHere: %s", why.c_str()); c.r[0] = uint32_t(kErrNotSupported); return;
         }
+        // The folio copies the sound out of the image into memory of its own
+        // (from the alloc function the caller passes, else AllocMem), so the
+        // image may be thrown away at once. Need for Speed loads each sound
+        // family into a scratch buffer, defines its samples, then reuses the
+        // buffer: played in place, the engine and crash sounds turned into
+        // static and clicks. The copy comes from the OS's memory here; the
+        // caller's free function is never needed for it. If that memory runs
+        // out, the sound stays where it is (TDORT_OLD_DEFINE_SAMPLE=1: always).
         s.addr = img + uint32_t(off);
+        static const bool old_define = std::getenv("TDORT_OLD_DEFINE_SAMPLE") != nullptr;
+        if (!old_define && len) {
+            const uint32_t a = alloc(uint32_t(len), kMemFromTop);
+            if (a) {
+                std::vector<uint8_t> tmp(rt.mem.ram.begin() + img + off, rt.mem.ram.begin() + img + off + len);
+                rt.mem.write_block(a, tmp.data(), uint32_t(len));
+                s.addr = s.host_alloc = a;
+            } else {
+                static int said = 0;
+                if (said++ < 3) rt.log("DefineSampleHere: no memory for a %zu-byte copy, the sound is played from the image", len);
+            }
+        }
+        s.data_offset = uint32_t(off); s.data_size = uint32_t(len);
         const int32_t item = audio_new(kAuSample, "");
         rt.audio->add_sample(item, s);
         c.r[0] = uint32_t(item);

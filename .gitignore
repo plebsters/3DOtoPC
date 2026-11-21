@@ -1,0 +1,12 @@
+# build output
+build/
+dist/
+bin/
+obj/
+*.user
+.vs/
+# converted games and their disc data (large, and the game files are not ours to publish)
+games/
+*.iso
+batch-results/
+batch-results-*.zip

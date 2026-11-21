@@ -1,0 +1,114 @@
+# Builds 3DO2PC on every push and pull request.
+#   linux:   builds the converter + runtime and runs the automated tests
+#   windows: builds the Windows package (converter, CLI, launcher) like Build-App.bat
+#            and uploads it as an artifact; a tag like v1.0 also makes a release.
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # only used to publish a release for v* tags
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          # clang/lld/llvm build the small 3DO test program used by the end-to-end tests
+          sudo apt-get install -y ninja-build clang lld llvm
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDO_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up the Visual Studio compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the converter core and CLI (C++)
+        shell: cmd
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDO_BUILD_TESTS=OFF || exit /b 1
+          cmake --build build --target 3DOtoPC_cli tdocore_dll || exit /b 1
+
+      - name: Assemble dist
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "build/3DO to PC CLI.exe" dist/
+          Copy-Item build/tdocore.dll dist/
+          Copy-Item -Recurse runtime dist/runtime
+          Copy-Item README.md dist/
+
+      - name: Build the Windows apps (WPF)
+        shell: pwsh
+        run: |
+          dotnet publish gui/TdoConverter/TdoConverter.csproj -c Release -r win-x64 --self-contained false -o dist
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Move-Item -Force dist/TdoConverter.exe "dist/3DO to PC.exe"
+          dotnet publish gui/Launcher/Launcher.csproj -c Release -r win-x64 --self-contained false -o dist
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Check the package
+        shell: pwsh
+        run: |
+          foreach ($f in "3DO to PC.exe", "3DO Launcher.exe", "3DO to PC CLI.exe", "tdocore.dll", "runtime/CMakeLists.txt") {
+            if (-not (Test-Path "dist/$f")) { Write-Error "missing from the package: $f"; exit 1 }
+          }
+          # The CLI starts (with no arguments it prints its usage and exits with 1).
+          $usage = & "dist/3DO to PC CLI.exe" 2>&1 | Out-String
+          if ($usage -notmatch 'usage:') { Write-Error "the CLI did not start: $usage"; exit 1 }
+          exit 0
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3DO2PC-windows
+          path: dist/
+          if-no-files-found: error
+
+      - name: Zip for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "3DO2PC-${{ github.ref_name }}-windows.zip"
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: 3DO2PC-${{ github.ref_name }}-windows.zip
+          generate_release_notes: true

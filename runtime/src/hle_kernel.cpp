@@ -1173,7 +1173,7 @@ void Portfolio::install_kernel_swis() {
     // --- misc
     K(kSampleSystemTime, "SampleSystemTime", [this](Cpu*) { c.r[0] = uint32_t(usec()); });
     K(kReadHwRandom, "ReadHardwareRandomNumber", [this](Cpu*) {
-        static uint32_t x = 0x3D0C0DE5;
+        uint32_t& x = hw_random_;
         x ^= x << 13; x ^= x >> 17; x ^= x << 5;
         c.r[0] = x;
     });

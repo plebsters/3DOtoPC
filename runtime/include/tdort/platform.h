@@ -2,6 +2,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <string>
 
 namespace tdort {
 
@@ -23,6 +24,9 @@ struct Platform {
     virtual void     queue_audio(const int16_t* stereo, int frames) = 0;
     virtual void     wait_frame(uint32_t hz) = 0;     // frame pacing
     virtual void     fatal(const char* /*message*/) {}  // tell the user the game stopped
+    // Save states: a key asked for one (1 = save, 2 = load) into slot 1..9.
+    virtual int      take_state_request(int& /*slot*/) { return 0; }
+    virtual void     notify(const std::string& /*message*/) {}   // a short message over the picture
 };
 
 std::unique_ptr<Platform> make_platform(bool headless);

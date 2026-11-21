@@ -75,6 +75,7 @@ struct Stats {
 };
 
 class Runtime {
+    friend struct StateIO;   // savestate.cpp
 public:
     explicit Runtime(RuntimeConfig cfg);
     ~Runtime();
@@ -83,6 +84,10 @@ public:
     int  run(Platform* platform);           // main loop; returns exit code
     void run_for(uint64_t cycles);          // execute ~cycles worth of guest code
     void request_vblank_wait() { vblank_wait_ = true; }
+
+    // Save states (savestate.cpp): the whole machine between two frames.
+    bool save_state(const std::string& path, std::string& err);
+    bool load_state(const std::string& path, std::string& err);
 
     // HLE registration
     void     register_swi(uint32_t number, std::string name, HleFn fn, bool stub = false);

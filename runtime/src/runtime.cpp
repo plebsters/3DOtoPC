@@ -470,6 +470,29 @@ int Runtime::run(Platform* platform) {
             if ((pad_state & PadNextDisc) && !(prev & PadNextDisc) && os) os->next_disc();
             prev = pad_state;
         }
+        {   // Save states, between frames: a key in the window (F5 save, F6 load), or
+            // TDORT_STATE_SAVE / TDORT_STATE_LOAD=<frame>:<slot> (tests, headless).
+            int slot = 1;
+            int req = platform->take_state_request(slot);
+            static const char* env_save = std::getenv("TDORT_STATE_SAVE");
+            static const char* env_load = std::getenv("TDORT_STATE_LOAD");
+            unsigned ef = 0; int es = 1;
+            if (!req && env_save && std::sscanf(env_save, "%u:%d", &ef, &es) >= 1 && ef == frames_) { req = 1; slot = es; }
+            if (!req && env_load && std::sscanf(env_load, "%u:%d", &ef, &es) >= 1 && ef == frames_) { req = 2; slot = es; }
+            if (req && os) {
+                const std::filesystem::path dir = std::filesystem::u8path(cfg.data_dir).parent_path() / "savestates";
+                const std::string file = (dir / ("slot" + std::to_string(slot) + ".state")).u8string();
+                std::string err;
+                if (req == 1) platform->notify(save_state(file, err) ? "Saved to slot " + std::to_string(slot)
+                                                                       : "Save failed: " + err);
+                else {
+                    const bool ok = load_state(file, err);
+                    platform->notify(ok ? "Loaded slot " + std::to_string(slot) : "Slot " + std::to_string(slot) + ": " + err);
+                    if (!ok) log("load state %s: %s", file.c_str(), err.c_str());
+                    if (crashed) break;
+                }
+            }
+        }
         mem.host_call = "a device completing at the frame start";
         if (os) os->frame(pad_state);
         if (os && ++frames_ % 120 == 0 && (frames_ <= 120 * 30 || std::getenv("TDORT_AUDIO_STATUS")))
