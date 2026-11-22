@@ -50,6 +50,8 @@ struct HleItem {
     // Semaphore
     int32_t  sem_owner = 0;        // task item holding it
     uint32_t sem_count = 0;
+    std::vector<int32_t> sem_waiters;   // tasks blocked in LockSemaphore, in arrival order
+    int32_t  sem_handoff = 0;      // waiter given the semaphore by UnlockSemaphore, not yet resumed
     // owning task (ports: whose signal to raise)
     int32_t  owner_task = 0;
     // NVRAM file (writable, 1-byte blocks)
@@ -306,7 +308,7 @@ private:   // programs we could not run, "exiting" soon
     void     audio_sleep_until(uint32_t ticks);
 
     // event broker (controller input)
-    struct Listener { int32_t port = 0; uint32_t trigger = 0, capture = 0; bool fresh = true; };
+    struct Listener { int32_t port = 0; uint32_t trigger = 0, capture = 0; bool fresh = true; uint32_t held = 0; };
     void    install_input();
     bool    broker_receive(HleItem& msg, uint32_t data, uint32_t size);   // game -> broker
     void    broker_post(Listener& l, uint32_t pad);
@@ -318,6 +320,9 @@ private:   // programs we could not run, "exiting" soon
     std::map<int32_t, uint32_t> broker_buf_;      // event message -> its guest buffer
     std::map<int32_t, std::pair<uint32_t, uint32_t>> read_address_;   // bitmap -> SetReadAddress(buffer, width)
     uint32_t disc_os_version_ = 0;
+    uint32_t disc_os_rom_ = 0;      // from the disc's rom_tags (not saved: re-read)
+    bool     disc_os_read_ = false;
+    uint32_t disc_os();
     int32_t  locale_item_ = 0;                    // the International folio's locale
     int32_t  broker_focus_ = 0;                   // EB_SetFocus listener
     mutable std::vector<std::string> discs_;      // disc folders (data, data_disc2, ...)

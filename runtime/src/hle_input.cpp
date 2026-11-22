@@ -110,6 +110,15 @@ void Portfolio::broker_post(Listener& l, uint32_t pad) {
     if ((wants & ev_bit(kEvControlPressed)) && pressed) events.push_back(kEvControlPressed);
     if ((wants & ev_bit(kEvControlReleased)) && released) events.push_back(kEvControlReleased);
     if ((wants & ev_bit(kEvControlUpdate)) && (pad != last_pad_ || l.fresh)) events.push_back(kEvControlUpdate);
+    // Buttons already held when the listener starts are left out of its
+    // update frames until they are let go: the console's broker only reports
+    // changes, so a new listener does not see a button that was pressed
+    // before it existed. Sewer Shark makes a new listener as it leaves its
+    // pause screen; seeing Start still held, it paused again at once and
+    // never left the pause. TDORT_OLD_HELD_BUTTONS=1: report them.
+    static const bool old_held = std::getenv("TDORT_OLD_HELD_BUTTONS") != nullptr;
+    if (l.fresh) l.held = old_held ? 0 : pad;
+    l.held &= pad;
     l.fresh = false;
     if (events.empty()) return;
 
@@ -152,7 +161,7 @@ void Portfolio::broker_post(Listener& l, uint32_t pad) {
         // came up; update/arrived frames hold the whole pad. (Corpse Killer
         // clears held buttons from released frames; with the whole pad there
         // its gun kept firing and the crosshair kept moving.)
-        uint32_t data = pad;
+        uint32_t data = pad & ~l.held;
         if (ev == kEvGivingFocus) data = 0;
         else if (!old_events) {
             if (ev == kEvControlPressed) data = pressed;

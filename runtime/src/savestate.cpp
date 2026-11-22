@@ -28,7 +28,7 @@ struct StateIO {
         int64_t at = open ? int64_t(std::ftell(it.fp)) : 0;
         a(open); a(at);
         a(it.device); a(it.reply_port); a(it.msg_item); a(it.msg_buffer); a(it.msg_buffer_size);
-        a(it.queue); a(it.signal); a(it.in_port); a(it.children); a(it.buffer); a(it.owns_buffer); a(it.sem_owner); a(it.sem_count);
+        a(it.queue); a(it.signal); a(it.in_port); a(it.children); a(it.buffer); a(it.owns_buffer); a(it.sem_owner); a(it.sem_count); a(it.sem_waiters); a(it.sem_handoff);
         a(it.owner_task); a(it.writable); a(it.block_size);
         if (!a.saving) {
             it.fp = nullptr;
@@ -68,7 +68,7 @@ struct StateIO {
     static void io(StateAr& a, Portfolio::VblIo& v) { a(v.ior); a(v.task); a(v.err); a(v.actual); a(v.due_frame); }
     static void io(StateAr& a, Portfolio::Phantom& p) { a(p.item); a(p.parent); a(p.end_frame); }
     static void io(StateAr& a, Portfolio::TimedSignal& t) { a(t.task); a(t.mask); a(t.at_ticks); }
-    static void io(StateAr& a, Portfolio::Listener& l) { a(l.port); a(l.trigger); a(l.capture); a(l.fresh); }
+    static void io(StateAr& a, Portfolio::Listener& l) { a(l.port); a(l.trigger); a(l.capture); a(l.fresh); a(l.held); }
 
     static void io(StateAr& a, Audio::Sample& s) {
         a(s.addr); a(s.bytes); a(s.frames); a(s.channels); a(s.bits); a(s.codec); a(s.rate); a(s.base_note); a(s.detune);
@@ -149,7 +149,7 @@ template <class T> void StateAr::io_struct(T& v) { StateIO::io(*this, v); }
 
 // File layout: magic, version, the game's LaunchMe hash, the frame, then the data.
 static constexpr char kMagic[8] = {'3', 'D', 'O', 'S', 'T', 'A', 'T', 'E'};
-static constexpr uint32_t kVersion = 4;
+static constexpr uint32_t kVersion = 6;
 
 static uint64_t checksum(const uint8_t* p, size_t n) {
     uint64_t h = 1469598103934665603ull;

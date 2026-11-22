@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 
 namespace tdort {
+
+namespace fs = std::filesystem;
 
 using namespace abi;
 
@@ -34,6 +37,16 @@ Portfolio::Portfolio(Runtime& r, const AifImage& img) : rt(r), c(r.cpu) {
     install_other_folios();
     install_input();
     install_tasks();
+
+    // On the console the OS has made dozens of items (folios, devices,
+    // drivers, its own tasks, ports and messages) before a game starts, so a
+    // game's first items have numbers well above 24. Quarterback Attack's
+    // buffer thread tells its commands (small messages carrying 1..24) from
+    // I/O completions (carrying the IOReq's item) by that number; its IOReq
+    // was item 24 here and was taken for a command. Game items now start at
+    // 64. TDORT_OLD_ITEM_NUMBERS=1: number them right after the runtime's.
+    if (!std::getenv("TDORT_OLD_ITEM_NUMBERS"))
+        while (items_.size() < 64) { items_.emplace_back(); items_.back().alive = false; }
 
     // Task start-up state, matching what the SDK's cstartup expects.
     const uint32_t argv0 = guest_string("LaunchMe");
@@ -942,7 +955,7 @@ void Portfolio::install_kernel_swis() {
     });
     K(30, "MayGetChar", [this](Cpu*) { c.r[0] = uint32_t(-1); });          // no debug terminal: no character
     K(35, "DiscOsVersion", [this](Cpu*) {                                  // DiscOsVersion(set): previous value
-        const uint32_t prev = disc_os_version_;
+        const uint32_t prev = disc_os();
         if (arg(0)) disc_os_version_ = arg(0);
         c.r[0] = prev;
     });
@@ -1008,16 +1021,43 @@ void Portfolio::install_kernel_swis() {
     K(kLockItem, "LockSemaphore", [this](Cpu*) {
         HleItem* s = item(int32_t(arg(0)));
         if (!s || s->kind != ItemKind::Semaphore) { c.r[0] = uint32_t(kErrBadItem); return; }
-        if (s->sem_owner == 0 || s->sem_owner == cur().item) {
-            s->sem_owner = cur().item; ++s->sem_count; wait_done(); c.r[0] = 1; return;
+        static const bool old_sem = std::getenv("TDORT_OLD_SEMAPHORE") != nullptr;
+        const int32_t me = cur().item;
+        if (!old_sem && s->sem_handoff == me && s->sem_owner == me) {   // handed over by UnlockSemaphore
+            s->sem_handoff = 0; wait_done(); c.r[0] = 1; return;
         }
-        if (arg(1) & 1) { block_retry(); return; }      // SEM_WAIT: wait for the holder
+        if (s->sem_owner == 0 || s->sem_owner == me) {
+            s->sem_owner = me; ++s->sem_count; wait_done(); c.r[0] = 1;
+            s->sem_waiters.erase(std::remove(s->sem_waiters.begin(), s->sem_waiters.end(), me), s->sem_waiters.end());
+            return;
+        }
+        if (arg(1) & 1) {                               // SEM_WAIT: wait for the holder
+            if (std::find(s->sem_waiters.begin(), s->sem_waiters.end(), me) == s->sem_waiters.end())
+                s->sem_waiters.push_back(me);
+            block_retry(); return;
+        }
         c.r[0] = 0;
     });
+    // The kernel gives a released semaphore straight to the first task waiting
+    // for it. Freeing it and letting the waiters race for it let a busier,
+    // more important holder take it back every time: Quarterback Attack's
+    // display thread unlocks and relocks it every frame, and the main task,
+    // waiting at lower priority, never got it (the intro froze when skipped).
+    // TDORT_OLD_SEMAPHORE=1: free it and let the waiters retry, as before.
     K(kUnlockItem, "UnlockSemaphore", [this](Cpu*) {
         HleItem* s = item(int32_t(arg(0)));
+        static const bool old_sem = std::getenv("TDORT_OLD_SEMAPHORE") != nullptr;
         if (s && s->kind == ItemKind::Semaphore && s->sem_owner == cur().item && s->sem_count && --s->sem_count == 0) {
             s->sem_owner = 0;
+            s->sem_handoff = 0;
+            while (!old_sem && !s->sem_waiters.empty()) {
+                const int32_t w = s->sem_waiters.front();
+                s->sem_waiters.erase(s->sem_waiters.begin());
+                HleTask* t = task_by_item(w);
+                if (!t || t->st == HleTask::St::Dead) continue;   // the waiter is gone
+                s->sem_owner = w; s->sem_count = 1; s->sem_handoff = w;
+                break;
+            }
             for (auto& t : tasks_) if (t.st == HleTask::St::Blocked) t.st = HleTask::St::Ready;   // waiters retry
         }
         c.r[0] = 0;
@@ -1180,6 +1220,11 @@ void Portfolio::install_kernel_swis() {
         HleItem* port = item(int32_t(arg(0)));
         HleItem* msg = item(int32_t(arg(1)));
         if (!port || !msg || port->kind != ItemKind::MsgPort) { c.r[0] = uint32_t(kErrBadItem); return; }
+        static const bool log_data = std::getenv("TDORT_LOG_MSGDATA") != nullptr;   // debugging aid
+        if (log_data && arg(2) && arg(3) >= 8 && arg(3) <= 64 && arg(2) + arg(3) <= kRamEnd)
+            rt.log("SendMsg port %d msg %d from %s (frame %u): %08X %08X %08X %08X %08X %08X", port->num, msg->num,
+                   cur().name.c_str(), frame_no_, r32(arg(2)), r32(arg(2) + 4), r32(arg(2) + 8), r32(arg(2) + 12),
+                   arg(3) >= 20 ? r32(arg(2) + 16) : 0, arg(3) >= 24 ? r32(arg(2) + 20) : 0);
         set_msg_data(*msg, arg(2), arg(3));
         if (port->num == broker_port_) {
             broker_receive(*msg, r32(msg->addr + message::DataPtr), r32(msg->addr + message::DataSize));
@@ -1209,6 +1254,8 @@ void Portfolio::install_kernel_swis() {
     K(kReplyMsg, "ReplyMsg", [this, set_msg_data](Cpu*) {
         HleItem* msg = item(int32_t(arg(0)));
         if (!msg) { c.r[0] = uint32_t(kErrBadItem); return; }
+        static const bool log_data = std::getenv("TDORT_LOG_MSGDATA") != nullptr;   // debugging aid
+        if (log_data) rt.log("ReplyMsg msg %d result %08X from %s (frame %u) to port %d", msg->num, arg(1), cur().name.c_str(), frame_no_, msg->reply_port);
         w32(msg->addr + message::Result, arg(1));
         set_msg_data(*msg, arg(2), arg(3));
         if (HleItem* port = item(msg->reply_port)) send_message(*port, *msg);
@@ -1483,12 +1530,17 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
             // A thread can be a little more important than its creator, as
             // libraries make their workers (the DataStream library: creator + 6
             // to + 11; Escape from Monster Manor and Burning Soldier stream
-            // movies that way). A big jump is capped to the creator's: games
-            // ask for 255 and then busy-wait on the parent (Slam 'n Jam's menu
-            // thread spins until the main task advances a state flag), which
-            // only works if the scheduler lets the parent run.
+            // movies that way). A request above the user range (10-199) is
+            // capped to the creator's: games ask for 255 and then busy-wait on
+            // the parent (Slam 'n Jam's menu thread spins until the main task
+            // advances a state flag), which only works if the parent can run.
+            // A valid priority is the game's design and is kept. Shock Wave 2's audio-setup thread asks
+            // for 119 under a 99 main task and must take each sound chunk the
+            // main task hands it before the next one overwrites the slot.
+            // TDORT_OLD_PRI_CAP=1: cap any jump of more than 15.
+            static const bool old_cap = std::getenv("TDORT_OLD_PRI_CAP") != nullptr;
             uint32_t p = pri ? pri : 100;
-            if (!idle_ && p > uint32_t(cur().pri) + 15) {
+            if (!idle_ && p > uint32_t(cur().pri) + 15 && (old_cap || p > 199)) {
                 rt.log("CreateThread(\"%s\"): priority %u capped to the creator's %u", name.c_str(), p, unsigned(cur().pri));
                 p = cur().pri;
             }
@@ -1551,6 +1603,24 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
 // no signal, no message (the caller's WaitIO sees IO_QUICK and returns). Other
 // requests are completed the asynchronous way: SIGF_IODONE, or a reply to the
 // IOReq's reply port.
+// The OS version the disc was made with (DiscOsVersion): set by the game,
+// otherwise the version and revision of the disc's kernel ("sherry", rom tag
+// type 7) in its rom_tags file. Old discs leave the version 0.
+uint32_t Portfolio::disc_os() {
+    if (disc_os_version_) return disc_os_version_;
+    if (!disc_os_read_) {
+        disc_os_read_ = true;
+        if (FILE* f = std::fopen((fs::u8path(disc_root()) / "rom_tags").u8string().c_str(), "rb")) {
+            uint8_t t[32];
+            while (std::fread(t, 1, 32, f) == 32)
+                if (t[0] == 0x0F && t[1] == 0x07) { disc_os_rom_ = (uint32_t(t[2]) << 8) | t[3]; break; }
+            std::fclose(f);
+        }
+        rt.log("disc OS version %u.%u (rom_tags)", disc_os_rom_ >> 8, disc_os_rom_ & 255);
+    }
+    return disc_os_rom_;
+}
+
 void Portfolio::complete_io(HleItem& ior, int32_t err, uint32_t actual, int32_t task_item) {
     HleTask* owner = task_item ? task_by_item(task_item) : &cur();
     if (!owner) owner = &cur();
@@ -1566,8 +1636,23 @@ void Portfolio::complete_io(HleItem& ior, int32_t err, uint32_t actual, int32_t 
         HleItem* m = item(ior.msg_item);
         if (!m) return;
         // The completion message carries the IOReq's item number (games pass it to LookupItem).
+        // As the kernel does: for a disc made with an OS newer than 1.4 the
+        // message is a small one (MESSAGE_SMALL) with io_Error as its result
+        // and ioi_User as its size; for older discs (Digital Pictures' Night
+        // Trap engine) it is a plain message with result and size 0.
+        // TDORT_OLD_IO_MSG=1: plain message, result io_Error, size untouched.
+        static const bool old_msg = std::getenv("TDORT_OLD_IO_MSG") != nullptr;
         w32(m->addr + message::DataPtr, uint32_t(ior.num));
-        w32(m->addr + message::Result, uint32_t(err));
+        if (old_msg) {
+            w32(m->addr + message::Result, uint32_t(err));
+        } else if (disc_os() > 0x170A) {    // DiscOs_1_4 = version 23.10
+            w8(m->addr + node::Flags, uint8_t(r8(m->addr + node::Flags) | 0x04));
+            w32(m->addr + message::Result, uint32_t(err));
+            w32(m->addr + message::DataSize, r32(ior.addr + ioreq::Info + ioinfo::User));
+        } else {
+            w32(m->addr + message::Result, 0);
+            w32(m->addr + message::DataSize, 0);
+        }
         send_message(*port, *m);
     }
     w32(owner->addr + task::SigBits, owner->pending);

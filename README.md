@@ -411,6 +411,12 @@ Environment variables:
 | `TDORT_OLD_FB_MSB=1` | the cel engine leaves frame-buffer bit 15 clear instead of writing the pixel's P bit |
 | `TDORT_OLD_ALLOC_LOW=1` | large allocations take the lowest free block instead of preferring memory above 512 KB |
 | `TDORT_OLD_CUE_SIGNALS=1` | a deleted audio cue keeps its signal bit allocated (old behaviour) |
+| `TDORT_OLD_PRI_CAP=1` | a thread more than 15 above its creator's priority is capped even when the priority is valid (10-199) |
+| `TDORT_LOG_MSGDATA=1` | logs every `SendMsg` (with the first data words) and `ReplyMsg` (debugging) |
+| `TDORT_OLD_IO_MSG=1` | an I/O completion message is a plain message with result io_Error, whatever OS the disc was made with |
+| `TDORT_OLD_ITEM_NUMBERS=1` | game items are numbered right after the runtime's own (they start at 64 otherwise) |
+| `TDORT_OLD_SEMAPHORE=1` | `UnlockSemaphore` frees the semaphore and lets the waiters retry instead of giving it to the first waiter |
+| `TDORT_OLD_HELD_BUTTONS=1` | a new event listener's update frames include buttons that were already held when it started |
 | `TDORT_TRACE_FROM=<frame>` | turns on `--trace` logging at that frame (debugging a long session) |
 | `TDORT_SMALL_ALLOC_FLOOR_KB=0` | no 32 KB floor for small allocations (the size in KB; 0 turns it off) |
 | `TDORT_OLD_SCREEN_DELETE=1` | deleting a screen group keeps its screens, bitmaps and frame buffers |
@@ -580,6 +586,42 @@ Fixes found by running games (each a difference from the real OS):
   buffers never reported completion, and its streamer printed "A buffer completion signal
   was received out of order!" and stalled. Deleting a cue now frees its bit
   (`TDORT_OLD_CUE_SIGNALS=1`: keep them as before). The game now plays round after round.
+* Shock Wave 2 froze a few seconds into the first mission: the cockpit stayed on screen
+  but nothing moved and the controls did nothing. The game's sound thread asks for
+  priority 119 under its 99 main task, and it must take each instrument and sample chunk
+  the main task hands it (one slot) before the next one arrives. The runtime capped the
+  thread to its creator's priority, so the main task overwrote chunks it had not taken yet;
+  the thread never got all seven, never started the game clock, and time stood still.
+  Priorities in the valid user range (10-199) are now kept; only a request above 199 is
+  still capped (`TDORT_OLD_PRI_CAP=1`: cap any jump of more than 15 as before). The ship
+  now flies and the radio messages stream in.
+* Quarterback Attack stayed on a black screen. Its buffer thread gets two kinds of
+  message on one port: commands from the main program (small messages carrying a number
+  from 1 to 24) and disc-read completions, which it recognises as small messages carrying
+  the IOReq's item number. Three things were different from the console:
+  - The completion message was a plain one. The kernel makes it a small message, with
+    io_Error as the result and ioi_User as the size, for discs made with an OS newer than
+    1.4. For older discs it sends a plain message with result and size 0 (the kernel
+    keeps that for Digital Pictures' earlier titles such as Night Trap). The runtime now
+    reads the disc's OS version from its `rom_tags` file (`DiscOsVersion` returns it too)
+    and does the same (`TDORT_OLD_IO_MSG=1`: plain message as before).
+  - Its IOReq was item 24, so the completion read as command 24. On the console the OS
+    has made dozens of items before a game starts, so game items now start at 64
+    (`TDORT_OLD_ITEM_NUMBERS=1`: number them as before).
+  - Skipping the intro froze it. The display thread unlocks and relocks a semaphore every
+    frame, and the main task, waiting for it at a lower priority, never got it: the
+    runtime freed the semaphore and let the waiters race for it. The kernel hands a
+    released semaphore to the first task waiting for it, and so does the runtime now
+    (`TDORT_OLD_SEMAPHORE=1`: race as before).
+  The intro, menus and plays now run.
+* Olympic Soccer now gets through its menus into a match with the earlier memory fix
+  (the 32 KB floor for small allocations).
+* Sewer Shark could not leave its pause screen. It makes a new event listener as it
+  unpauses, and the runtime's first update to a new listener held the whole pad, so
+  Start, still held from the unpause press, paused the game again at once. The console's
+  broker only reports changes, so buttons already held when a listener starts are now
+  left out of its updates until they are let go (`TDORT_OLD_HELD_BUTTONS=1`: report
+  them). Pausing and unpausing now work, and the intro, story and game play run.
 * Theme Park's world map was covered in garbage (rows of orange and black stripes). The
   game loads its sprite data, then adds the data's address to each offset in the sprite
   table, but only to offsets smaller than that address. On the console the OS fills low
