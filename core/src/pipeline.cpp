@@ -87,6 +87,7 @@ bool write_game_cmake(const fs::path& out, const std::string& exe, const fs::pat
     o << "target_link_libraries(" << exe << " PRIVATE tdort)\n"
          "if(MSVC)\n  target_compile_options(" << exe << " PRIVATE /bigobj /O2)\n"
          "else()\n  target_compile_options(" << exe << " PRIVATE -O2)\nendif()\n"
+
          "foreach(cfg \"\" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)\n"
          "  set_target_properties(" << exe << " PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} \"${CMAKE_CURRENT_SOURCE_DIR}\")\n"
          "endforeach()\n";

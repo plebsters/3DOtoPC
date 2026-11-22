@@ -82,6 +82,10 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; WorkingDir: "{app}"; Tasks: desktopicon
 Name: "{autodesktop}\3DO Launcher"; Filename: "{app}\{#MyLauncherExe}"; WorkingDir: "{app}"; Tasks: desktopicon
 
+[InstallDelete]
+; Left by the Nov 22 test build that bundled its own compiler: remove it so Visual Studio is used.
+Type: filesandordirs; Name: "{app}\toolchain"
+
 [Run]
 ; Offered (and ticked) only when the compiler tools or the .NET desktop runtime are missing.
 ; The script asks for administrator rights itself and installs only what is missing.

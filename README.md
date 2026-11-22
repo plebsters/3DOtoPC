@@ -56,6 +56,7 @@ What Setup does:
   either is missing, its last page offers to run `Install-Prerequisites.ps1`, which asks for
   administrator rights and downloads only what is missing. It's also in the Start menu as
   "Install the tools for converting games".
+- Removes a `toolchain\` folder left by the Nov 22 test build that bundled its own compiler.
 - Upgrades an older install in place. Uninstalling removes the program and its cache but
   keeps the games you converted.
 
@@ -594,7 +595,8 @@ Fixes found by running games (each a difference from the real OS):
   the thread never got all seven, never started the game clock, and time stood still.
   Priorities in the valid user range (10-199) are now kept; only a request above 199 is
   still capped (`TDORT_OLD_PRI_CAP=1`: cap any jump of more than 15 as before). The ship
-  now flies and the radio messages stream in.
+  now flies and the radio messages stream in. The same fix stops Slam 'n Jam freezing on
+  "End of 1st quarter": its sound thread ("snm", priority 175) was capped the same way.
 * Quarterback Attack stayed on a black screen. Its buffer thread gets two kinds of
   message on one port: commands from the main program (small messages carrying a number
   from 1 to 24) and disc-read completions, which it recognises as small messages carrying
@@ -786,3 +788,6 @@ against the local game builds before release.
 2. Cinepak / streaming-movie library, DSP effects, more input devices.
 3. Recompiler optimizations: direct block chaining, register caching, jump-table recovery.
 4. Per-game patch files (widescreen, 60 fps, input remaps) and an Xbox UWP platform layer.
+5. Picture: draw at 2x/4x internal resolution (sharp 3D games), a Direct3D 11 presenter with
+   scaling filters (integer, xBR, CRT, FSR 1), which also lets driver frame generation
+   (NVIDIA Smooth Motion, AMD AFMF) work.
