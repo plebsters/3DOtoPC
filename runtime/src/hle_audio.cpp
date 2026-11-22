@@ -386,6 +386,30 @@ void Portfolio::audio_deleted(HleItem& it) {
     for (auto& [t, list] : template_attach_)
         list.erase(std::remove_if(list.begin(), list.end(), [&](const TemplateAttach& a) { return a.item == it.num; }), list.end());
     cue_owner_.erase(it.num);
+    // A cue's signal bit goes back to its task when the cue is deleted, as the
+    // folio frees it. Kept allocated, the bits ran out after about 23 cues:
+    // Twisted makes new cues for each stream, later cues got signal 0, their
+    // buffers never reported completion and its sound streamer stopped with
+    // "A buffer completion signal was received out of order!".
+    // TDORT_OLD_CUE_SIGNALS=1: keep the bits as before.
+    static const bool old_cues = std::getenv("TDORT_OLD_CUE_SIGNALS") != nullptr;
+    if (auto s = cue_signals_.find(it.num); s != cue_signals_.end() && !old_cues) {
+        const uint32_t sig = s->second;
+        int32_t owner = 0;
+        if (auto o = cue_signal_task_.find(it.num); o != cue_signal_task_.end()) owner = o->second;
+        cue_signals_.erase(s);
+        cue_signal_task_.erase(it.num);
+        bool shared = false;   // another live cue of the same task with this bit
+        for (const auto& [c2, s2] : cue_signals_) {
+            auto o2 = cue_signal_task_.find(c2);
+            if (s2 == sig && o2 != cue_signal_task_.end() && o2->second == owner) { shared = true; break; }
+        }
+        if (HleTask* t = task_by_item(owner); t && sig && !shared && (sig & ~0xFFu)) {
+            t->allocated &= ~sig;
+            t->pending &= ~sig;
+            w32(t->addr + task::AllocatedSigs, t->allocated);
+        }
+    }
 }
 
 void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
@@ -402,6 +426,7 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
             if (t) for (uint32_t b = 30; b >= kSigFirstUser; --b) if (!(t->allocated & (1u << b))) { sig = 1u << b; break; }
             if (t) t->allocated |= sig;
             cue_signals_[cue] = sig;
+            if (sig) cue_signal_task_[cue] = task;
         }
         if (rt.cfg.trace) rt.log("audio cue %d -> task %d signal %08X", cue, task, sig);
         raise_signal(task, sig);

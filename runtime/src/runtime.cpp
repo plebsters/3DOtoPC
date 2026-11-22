@@ -495,6 +495,9 @@ int Runtime::run(Platform* platform) {
         }
         mem.host_call = "a device completing at the frame start";
         if (os) os->frame(pad_state);
+        // Debugging aid: TDORT_TRACE_FROM=<frame> turns on --trace at that frame
+        // (a full trace of a long session is too big to keep).
+        if (static const char* tf = std::getenv("TDORT_TRACE_FROM"); tf && frames_ + 1 == uint32_t(std::strtoul(tf, nullptr, 10))) cfg.trace = true;
         if (os && ++frames_ % 120 == 0 && (frames_ <= 120 * 30 || std::getenv("TDORT_AUDIO_STATUS")))
             log("%s", os->status_line(frames_).c_str());
         const uint64_t frame_start = cpu.cycles;

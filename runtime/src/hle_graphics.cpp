@@ -540,6 +540,7 @@ uint32_t Portfolio::cue_signal(int32_t cue) {
     cur().allocated |= sig;
     w32(cur().addr + task::AllocatedSigs, cur().allocated);
     cue_signals_[cue] = sig;
+    if (sig) cue_signal_task_[cue] = cur().item;
     return sig;
 }
 

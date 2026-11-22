@@ -300,6 +300,7 @@ private:   // programs we could not run, "exiting" soon
     struct TimedSignal { int32_t task; uint32_t mask, at_ticks; };
     std::vector<TimedSignal> timed_signals_;
     std::map<int32_t, uint32_t> cue_signals_;
+    std::map<int32_t, int32_t>  cue_signal_task_;   // cue item -> task its signal bit was taken from (freed with the cue)
     uint32_t audio_ticks() const;
     uint32_t cue_signal(int32_t cue);
     void     audio_sleep_until(uint32_t ticks);

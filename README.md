@@ -410,6 +410,8 @@ Environment variables:
 | `TDORT_NO_VDL_CLUT=1` | colour words in a display list (VDL) are ignored; the standard ramp is used |
 | `TDORT_OLD_FB_MSB=1` | the cel engine leaves frame-buffer bit 15 clear instead of writing the pixel's P bit |
 | `TDORT_OLD_ALLOC_LOW=1` | large allocations take the lowest free block instead of preferring memory above 512 KB |
+| `TDORT_OLD_CUE_SIGNALS=1` | a deleted audio cue keeps its signal bit allocated (old behaviour) |
+| `TDORT_TRACE_FROM=<frame>` | turns on `--trace` logging at that frame (debugging a long session) |
 | `TDORT_SMALL_ALLOC_FLOOR_KB=0` | no 32 KB floor for small allocations (the size in KB; 0 turns it off) |
 | `TDORT_OLD_SCREEN_DELETE=1` | deleting a screen group keeps its screens, bitmaps and frame buffers |
 | `TDORT_OLD_CSG_BITMAPS=1` | `CreateScreenGroup` makes as many bitmaps per screen as asked, instead of one as the OS does |
@@ -571,6 +573,13 @@ Fixes found by running games (each a difference from the real OS):
   keeps the pixel's P bit (as decoded, before the CCB's P-mode override) in bit 15, and a
   screen shown through a VDL colour table bypasses the table for such pixels
   (`TDORT_OLD_FB_MSB=1`: bit 15 stays clear). The intro movies now look right.
+* Twisted stopped making progress after a while: the board stayed on the spinner, or a
+  game screen stood still. Every audio cue takes a signal bit from its task, and the bits
+  were never given back when the cue was deleted. Twisted makes new cues for each stream,
+  so after about 23 of them the task had no bits left and new cues got signal 0. Their sound
+  buffers never reported completion, and its streamer printed "A buffer completion signal
+  was received out of order!" and stalled. Deleting a cue now frees its bit
+  (`TDORT_OLD_CUE_SIGNALS=1`: keep them as before). The game now plays round after round.
 * Theme Park's world map was covered in garbage (rows of orange and black stripes). The
   game loads its sprite data, then adds the data's address to each offset in the sprite
   table, but only to offsets smaller than that address. On the console the OS fills low
