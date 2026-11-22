@@ -46,6 +46,7 @@ struct HleItem {
     // Screen group / screen / bitmap
     std::vector<int32_t> children;
     uint32_t buffer = 0;
+    bool     owns_buffer = false;  // Bitmap: buffer allocated by CreateScreenGroup, freed with it
     // Semaphore
     int32_t  sem_owner = 0;        // task item holding it
     uint32_t sem_count = 0;
@@ -118,7 +119,8 @@ public:
     void     update_free_page_bits();
     void     plot(int32_t bitmap_item, int32_t x, int32_t y, uint16_t pen);
     int32_t  draw_text(uint32_t gc, int32_t bitmap_item, const std::vector<uint32_t>& text);
-    uint32_t audio_rate_ = 240u << 16, audio_rate_ticks_ = 0, audio_rate_frame_ = 0;   // the audio clock
+    uint32_t audio_rate_ = 240u << 16, audio_rate_ticks_ = 0, audio_rate_frame_ = 0;
+    int32_t  audio_clock_owner_ = 0;   // item returned by OwnAudioClock
     void     set_audio_rate(uint32_t rate16);
     uint32_t font_ = 0;                           // the Font structure GetCurrentFont returns
     // Compression folio (hle_compress.cpp)
@@ -221,6 +223,8 @@ private:
     std::map<int32_t, uint32_t> vdl_buffer_;          // VDL item -> frame buffer it shows
     std::map<int32_t, int32_t>  screen_vdl_;          // screen -> VDL set on it
     std::map<int32_t, uint32_t> screen_vdl_buffer_;   // screen -> frame buffer from its VDL
+    std::map<int32_t, std::vector<uint32_t>> vdl_clut_;   // VDL item -> per-line colour table (only if not linear)
+    std::vector<uint32_t> parse_vdl_clut(uint32_t vdl, uint32_t words);
     struct DiskStream { FILE* fp; uint32_t size, pos; std::string path; };
     struct DirList { std::vector<std::string> entries; size_t next; };
     std::map<uint32_t, DirList> dirs_;                              // OpenDirectory*: guest Directory* -> listing

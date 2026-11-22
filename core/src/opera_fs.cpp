@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <map>
 
 namespace fs = std::filesystem;
 
@@ -139,9 +140,26 @@ bool OperaDisc::read_file(const OperaEntry& e, std::vector<uint8_t>& out, std::s
 
 bool OperaDisc::extract_all(const std::string& out_dir, std::string& err,
                             const std::function<void(const OperaEntry&, size_t, size_t)>& progress) {
+    // The 3DO looks names up without regard to case and takes the first match
+    // in a directory, while Windows can't hold two names that differ only in
+    // case, nor a file and a folder of the same name. BattleSport has such a
+    // pair under art/anims ("cannot write ...\eye.anim\new"). The first
+    // entry wins, as on the console; the others (and anything inside a
+    // folder that lost) are skipped and listed in skipped().
+    auto lower = [](std::string s) { for (auto& ch : s) ch = char(std::tolower((unsigned char)ch)); return s; };
+    std::map<std::string, bool> claimed;       // lower-case path -> is a directory
+    skipped_.clear();
     size_t i = 0;
     for (auto& e : entries_) {
         ++i;
+        const std::string key = lower(e.path);
+        bool skip = claimed.count(key) != 0;
+        for (size_t p = key.find('/', 1); !skip && p != std::string::npos; p = key.find('/', p + 1)) {
+            auto it = claimed.find(key.substr(0, p));
+            if (it == claimed.end() || !it->second) skip = true;   // parent lost or is a file
+        }
+        if (skip) { skipped_.push_back(e.path); continue; }
+        claimed[key] = e.is_dir;
         // each name stored so that Windows accepts it (tdort/host_name.h)
         fs::path dst = fs::u8path(out_dir);
         {

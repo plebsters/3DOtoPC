@@ -706,7 +706,15 @@ void Portfolio::install_audio_swis() {
     });
     A(30, "WhereAttachment", [this](Cpu*) {
         Audio::Attachment* a = rt.audio->attachment(int32_t(arg(0)));
-        c.r[0] = a ? uint32_t(a->pos) : uint32_t(kErrBadItem);
+        if (!a) { c.r[0] = uint32_t(kErrBadItem); return; }
+        // Portfolio returns a byte offset into the sample (an envelope gives
+        // its segment index). Wing Commander III waits for it to reach the
+        // sample's byte length. TDORT_OLD_WHERE_FRAMES returns frames.
+        static const bool old = std::getenv("TDORT_OLD_WHERE_FRAMES") != nullptr;
+        if (!old && a->sample)
+            c.r[0] = uint32_t(int64_t(double(int64_t(a->pos)) * rt.audio->attachment_bytes_per_frame(int32_t(arg(0)))));
+        else
+            c.r[0] = uint32_t(a->pos);
     });
     A(32, "BendInstrumentPitch", [this](Cpu*) {
         if (Audio::Instrument* in = rt.audio->instrument(int32_t(arg(0)))) in->bend = arg(1) / 65536.0;

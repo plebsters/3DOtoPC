@@ -5,9 +5,12 @@ rem   dist\"3DO to PC CLI.exe" - command-line converter
 rem   dist\"3DO Launcher.exe" - lists your converted games and starts them
 rem   dist\tdocore.dll, dist\runtime\  - used by both to build games
 rem Requires: Build Tools for Visual Studio 2022 with "Desktop development with C++".
+rem Build-App.bat /nopause : no pause and no Explorer window at the end (Build-Installer.bat uses it).
 setlocal EnableExtensions
 title Build 3DO to PC
 cd /d "%~dp0"
+set "NOPAUSE="
+if /i "%~1"=="/nopause" set "NOPAUSE=1"
 
 rem ---------------------------------------------------------------- compiler
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -88,6 +91,7 @@ echo.
 echo [3/3] Done. Output: %DIST%
 if "%GUI%"=="yes" echo   "3DO to PC.exe"    - the Windows app
 echo   "3DO to PC CLI.exe" - command line:  "3DO to PC CLI" convert game.iso outfolder
+if defined NOPAUSE exit /b 0
 start "" explorer "%DIST%"
 echo.
 pause
@@ -113,6 +117,7 @@ echo ---------------------------------------------------------------------
 echo.
 echo Install-Prerequisites.bat adds it to your Build Tools (asks for admin, a few minutes).
 echo.
+if defined NOPAUSE goto :end
 choice /c YN /m "Run Install-Prerequisites.bat now"
 if errorlevel 2 goto :end
 start "" "%~dp0Install-Prerequisites.bat"
@@ -125,5 +130,5 @@ echo ERROR: the build failed. Copy the text in this window and send it to me.
 
 :end
 echo.
-pause
+if not defined NOPAUSE pause
 exit /b 1

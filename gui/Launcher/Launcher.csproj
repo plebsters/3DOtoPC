@@ -4,6 +4,8 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <!-- Run on .NET 8 or any newer desktop runtime the PC has. -->
+    <RollForward>Major</RollForward>
     <Nullable>enable</Nullable>
     <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>3DO Launcher</AssemblyName>

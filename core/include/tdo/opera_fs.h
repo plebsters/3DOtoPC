@@ -40,6 +40,10 @@ public:
     bool extract_all(const std::string& out_dir, std::string& err,
                      const std::function<void(const OperaEntry&, size_t, size_t)>& progress = {});
 
+    // Entries extract_all left out: a second name that differs only in case
+    // (the console finds the first), and anything inside such a folder.
+    const std::vector<std::string>& skipped() const { return skipped_; }
+
     // Read `count` logical 2048-byte blocks.
     bool read_blocks(uint32_t block, uint32_t count, std::vector<uint8_t>& out);
 
@@ -48,6 +52,7 @@ private:
                   uint32_t block_size, int depth, std::string& err);
 
     FILE* f_ = nullptr;
+    std::vector<std::string> skipped_;
     uint32_t sector_size_ = 2048, sector_data_off_ = 0;
     OperaVolume vol_;
     std::vector<OperaEntry> entries_;

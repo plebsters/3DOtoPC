@@ -237,6 +237,8 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
             cx.error(err); return 3;
         }
         cx.info("Extracted disc contents to " + data.u8string());
+        for (const auto& sk : disc.skipped())
+            cx.info("skipped " + sk + ": another entry has the same name apart from case (the console uses the first)");
 
         // 3. Load the executable
         const tdo::OperaEntry* exe_entry = disc.find(launch);

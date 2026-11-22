@@ -57,7 +57,16 @@ const uint32_t* Gfx::scan_out() {
                 const uint8_t* p = src + (y * kWidth + x) * 2;
                 pix = (uint32_t(p[0]) << 8) | p[1];
             }
-            frame_[y * kWidth + x] = rgb555_to_xrgb(pix & 0x7FFF);
+            if (clut_.size() >= size_t(kHeight) * 32 && (pix & 0x8000)) {
+                frame_[y * kWidth + x] = rgb555_to_xrgb(pix & 0x7FFF);   // bit 15: the colour table is bypassed
+            } else if (clut_.size() >= size_t(kHeight) * 32 && (pix & 0x7FFF) == 0) {
+                frame_[y * kWidth + x] = 0;   // a 0 pixel shows the background colour (black), not entry 0
+            } else if (clut_.size() >= size_t(kHeight) * 32) {
+                const uint32_t* t = &clut_[size_t(y) * 32];
+                frame_[y * kWidth + x] = (t[(pix >> 10) & 31] & 0xFF0000) | (t[(pix >> 5) & 31] & 0xFF00) | (t[pix & 31] & 0xFF);
+            } else {
+                frame_[y * kWidth + x] = rgb555_to_xrgb(pix & 0x7FFF);
+            }
         }
     }
     return frame_.data();
@@ -124,6 +133,11 @@ Gfx::Pixel Gfx::decode(uint32_t raw, int bpp, bool uncoded) const {
         p.color = uint16_t(v & 0x7FFF);
         if (pmode_from_plut) p.pmode = uint8_t(v >> 15);
     }
+    // The pixel's top bit as decoded (before POVER) goes to the frame buffer's
+    // bit 15, which the display reads: with a VDL colour table, such pixels
+    // show their RGB directly (Wing Commander III's movies mark the pixels
+    // that are not in the scene's table this way).
+    p.msb = p.pmode != 0;
     // P-mode override from the CCB (POVER)
     switch ((flags >> 7) & 3) {
     case 2: p.pmode = 0; break;
@@ -180,6 +194,8 @@ uint16_t Gfx::process(const Pixel& p, uint16_t fb) const {
         }
     }
     if (out == 0 && !(r_.flags & kNoBlk)) out = 0x0400;   // keep "black" distinct from background
+    static const bool old_msb = std::getenv("TDORT_OLD_FB_MSB") != nullptr;
+    if (p.msb && !old_msb) out |= 0x8000;
     return out;
 }
 

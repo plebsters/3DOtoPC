@@ -27,6 +27,10 @@ public:
     void set_display_buffer(uint32_t addr, int lines = kHeight) { display_addr_ = addr; display_lines_ = lines; }
     int display_lines() const { return display_lines_; }
     uint32_t display_buffer() const { return display_addr_; }
+    // Colour table from the screen's display list (VDL): kHeight lines of
+    // 32 entries, each 0x00RRGGBB, giving the 8-bit level of each 5-bit
+    // value per channel. Empty: the standard linear table.
+    void set_display_clut(const std::vector<uint32_t>* clut) { clut_ = clut ? *clut : std::vector<uint32_t>(); }
 
     // Convert the guest framebuffer to XRGB8888.
     // 3DO bitmaps are 16bpp RGB555 stored in "LRform": each 32-bit word holds
@@ -47,7 +51,7 @@ private:
         uint16_t plut[32] = {};
     } r_;
 
-    struct Pixel { uint16_t color; uint8_t pmode; uint8_t amv_r, amv_g, amv_b; bool transparent; };
+    struct Pixel { uint16_t color; uint8_t pmode; uint8_t amv_r, amv_g, amv_b; bool transparent; bool msb; };
 
     void draw_one(const CelTarget& t, uint32_t source);
     Pixel decode(uint32_t raw, int bpp, bool uncoded) const;
@@ -62,6 +66,7 @@ private:
     std::vector<uint32_t> frame_;
     int      display_lines_ = kHeight;
     uint32_t display_addr_ = 0;
+    std::vector<uint32_t> clut_;
 };
 
 } // namespace tdort

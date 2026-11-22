@@ -15,6 +15,7 @@ using namespace abi;
 int32_t Portfolio::create_screen_group(uint32_t screen_items_out, uint32_t tags) {
     uint32_t screens = 1, bitmaps = 1, height = 240, width_arr = 0, height_arr = 0, buf_arr = 0;
     each_tag(tags, [&](uint32_t t, uint32_t a) {
+        if (rt.cfg.trace) rt.log("CreateScreenGroup tag %u = %08X", t, a);
         switch (t) {
         case kCsgScreenCount: screens = a; break;
         case kCsgBitmapCount: bitmaps = a; break;
@@ -27,9 +28,31 @@ int32_t Portfolio::create_screen_group(uint32_t screen_items_out, uint32_t tags)
     });
     screens = std::clamp<uint32_t>(screens, 1, 8);
     bitmaps = std::clamp<uint32_t>(bitmaps, 1, 8);
+    // The OS makes one bitmap per screen whatever CSG_TAG_BITMAPCOUNT says
+    // (its screen code forces the count to 1), so screen n takes entry n of
+    // the buffer array. Star Control II asks for 4 bitmaps per screen and
+    // passes 4 buffers: the second screen got garbage from past the end of
+    // the array, and clearing it through the SPORT device wiped the game's
+    // code. TDORT_OLD_CSG_BITMAPS=1: honour the count.
+    static const bool old_count = std::getenv("TDORT_OLD_CSG_BITMAPS") != nullptr;
+    if (!old_count) bitmaps = 1;
 
-    HleItem& g = new_item(ItemKind::ScreenGroup, kSubsysGraphics, kNodeScreenGroup, 64, "ScreenGroup");
+    // ScreenGroup: ItemNode, sg_Y, sg_ScreenHeight, sg_DisplayHeight,
+    // sg_SharedList (List), sg_Add_SG_Called, sg_ScreenList (List). Games walk
+    // sg_ScreenList: Snow Job hands each screen's buffer to ControlMem that
+    // way, and with the list missing it looped forever at start-up.
+    constexpr uint32_t kSgY = 36, kSgScreenHeight = 40, kSgDisplayHeight = 44, kSgSharedList = 48,
+                       kSgScreenList = 84, kSgSize = kSgScreenList + list::Size;
+    HleItem& g = new_item(ItemKind::ScreenGroup, kSubsysGraphics, kNodeScreenGroup, kSgSize, "ScreenGroup");
     const int32_t group = g.num;
+    {
+        const uint32_t ga = g.addr;
+        w32(ga + kSgY, 0);
+        w32(ga + kSgScreenHeight, height);
+        w32(ga + kSgDisplayHeight, height);
+        list_init(ga + kSgSharedList, 0);
+        list_init(ga + kSgScreenList, 0);
+    }
     for (uint32_t s = 0; s < screens; ++s) {
         HleItem& scr = new_item(ItemKind::Screen, kSubsysGraphics, kNodeScreen, screen::Size, "Screen");
         const int32_t scr_num = scr.num;
@@ -41,9 +64,12 @@ int32_t Portfolio::create_screen_group(uint32_t screen_items_out, uint32_t tags)
             uint32_t w = width_arr ? r32(width_arr + 4 * b) : 320;
             uint32_t h = height_arr ? r32(height_arr + 4 * b) : height;
             uint32_t buf = buf_arr ? r32(buf_arr + 4 * (s * bitmaps + b)) : 0;
+            if (rt.cfg.trace) rt.log("  screen %u bitmap %u: %ux%u buffer %08X", s, b, w, h, buf);
+            const bool ours = !buf;
             if (!buf) buf = alloc(w * h * 2, kMemVram);
             HleItem& bm = new_item(ItemKind::Bitmap, kSubsysGraphics, kNodeBitmap, bitmap::Size, "Bitmap");
             bm.buffer = buf;
+            bm.owns_buffer = ours && buf;
             w32(bm.addr + bitmap::Buffer, buf);
             w32(bm.addr + bitmap::Width, w);
             w32(bm.addr + bitmap::Height, h);
@@ -54,6 +80,7 @@ int32_t Portfolio::create_screen_group(uint32_t screen_items_out, uint32_t tags)
             item(scr_num)->children.push_back(bm.num);
         }
         item(group)->children.push_back(scr_num);
+        list_add_tail(item(group)->addr + kSgScreenList, scr_addr);
         if (screen_items_out) w32(screen_items_out + 4 * s, uint32_t(scr_num));
     }
     rt.log("CreateScreenGroup: %u screen(s) x %u bitmap(s) -> group %d", screens, bitmaps, group);
@@ -72,10 +99,61 @@ uint32_t Portfolio::pixel_address(int32_t item_num, int32_t x, int32_t y) {
     return r32(it->addr + bitmap::Buffer) + uint32_t(((y >> 1) * w + x) * 4 + (y & 1) * 2);
 }
 
+// Colour table loaded by a VDL, line by line. Each entry is four header
+// words (control with the line count, current and previous frame buffer,
+// next entry) followed by colour words: bit 31 clear, bits 30-29 the channel
+// (0 all, 1 blue, 2 green, 3 red), bits 28-24 the entry, then 8-bit R, G, B.
+// Words with bit 31 set are display controls. Returns an empty table when
+// the list only loads (close to) the standard linear ramp.
+std::vector<uint32_t> Portfolio::parse_vdl_clut(uint32_t vdl, uint32_t words) {
+    constexpr int kLines = Gfx::kHeight;
+    uint32_t cur[32];
+    for (uint32_t i = 0; i < 32; ++i) { const uint32_t l = (i << 3) | (i >> 2); cur[i] = (l << 16) | (l << 8) | l; }
+    std::vector<uint32_t> t(size_t(kLines) * 32);
+    bool custom = false;
+    int line = 0;
+    uint32_t e = vdl;
+    const uint32_t end = vdl + std::max<uint32_t>(words, 4) * 4;
+    for (int guard = 0; guard < 512 && line < kLines && e && guest_range_ok(e, 16); ++guard) {
+        const uint32_t ctl = r32(e), next = r32(e + 12);
+        int count = int(ctl & 0x1FF);
+        // Colour words run up to the next entry (relative: counted from the
+        // word after the header) or for the length field's words.
+        uint32_t next_addr = (ctl & 0x40000) ? e + 16 + next : next;
+        uint32_t stop = (next_addr > e + 16 && next_addr - e <= 0x400) ? next_addr : e + 16 + ((ctl >> 9) & 0x3F) * 4;
+        for (uint32_t a = e + 16; a < stop && guest_range_ok(a, 4); a += 4) {
+            const uint32_t w = r32(a);
+            if (w & 0x80000000u) continue;
+            const uint32_t pen = (w >> 24) & 31, sel = (w >> 29) & 3;
+            const uint32_t mask = sel == 0 ? 0xFFFFFFu : sel == 1 ? 0xFFu : sel == 2 ? 0xFF00u : 0xFF0000u;
+            cur[pen] = (cur[pen] & ~mask) | (w & mask);
+        }
+        for (uint32_t i = 0; i < 32 && !custom; ++i) {
+            const int lin = int((i << 3) | (i >> 2));
+            for (int sh = 0; sh < 24; sh += 8)
+                if (std::abs(int((cur[i] >> sh) & 0xFF) - lin) > 12) { custom = true; break; }
+        }
+        if (count == 0) count = 1;
+        for (int k = 0; k < count && line < kLines; ++k, ++line) std::copy(cur, cur + 32, &t[size_t(line) * 32]);
+        if (next_addr == 0 || next_addr == e || (words && next_addr >= end + 0x400)) break;
+        e = next_addr;
+    }
+    for (; line < kLines; ++line) std::copy(cur, cur + 32, &t[size_t(line) * 32]);
+    if (!custom) return {};
+    if (rt.cfg.trace) rt.log("VDL %08X: custom colour table", vdl);
+    return t;
+}
+
 int32_t Portfolio::display_screen(int32_t s0, int32_t /*s1: odd field, same image here*/) {
     HleItem* scr = item(s0);
     if (!scr || scr->kind != ItemKind::Screen || scr->children.empty()) return kErrBadItem;
     // A display list set with SetVDL decides which memory the screen shows.
+    {
+        const std::vector<uint32_t>* clut = nullptr;
+        if (auto sv = screen_vdl_.find(s0); sv != screen_vdl_.end())
+            if (auto t = vdl_clut_.find(sv->second); t != vdl_clut_.end()) clut = &t->second;
+        rt.gfx->set_display_clut(clut);
+    }
     if (auto v = screen_vdl_buffer_.find(s0); v != screen_vdl_buffer_.end()) rt.gfx->set_display_buffer(v->second);
     else if (HleItem* bm = item(scr->children[0])) {
         // A screen shows as many lines as its bitmap has; a 200-line screen
@@ -167,7 +245,7 @@ void Portfolio::install_graphics() {
     v[gvCreateScreenGroup] = [this](Cpu*) { c.r[0] = uint32_t(create_screen_group(arg(0), arg(1))); };
     v[gvAddScreenGroup]    = [this](Cpu*) { c.r[0] = 0; };
     v[gvRemoveScreenGroup] = [this](Cpu*) { c.r[0] = 0; };
-    v[gvDeleteScreenGroup] = [this](Cpu*) { c.r[0] = 0; };
+    v[gvDeleteScreenGroup] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };
     v[gvDisplayScreen]     = [this](Cpu*) { c.r[0] = uint32_t(display_screen(int32_t(arg(0)), int32_t(arg(1)))); };
     v[gvGetPixelAddress]   = [this](Cpu*) {                // GetPixelAddress(screen or bitmap, x, y)
         c.r[0] = pixel_address(int32_t(arg(0)), int32_t(arg(1)), int32_t(arg(2)));
@@ -188,6 +266,14 @@ void Portfolio::install_graphics() {
     v[gvSubmitVDL]         = [this](Cpu*) {                // SubmitVDL(vdl, length, type) -> item
         HleItem& it = new_item(ItemKind::Generic, kSubsysGraphics, 6, 16, "VDL");
         vdl_buffer_[it.num] = arg(0) && guest_range_ok(arg(0), 8) ? r32(arg(0) + 4) : 0;
+        // The system copies the list when it is submitted, so its colours are
+        // read now. Wing Commander III's movies only look right through the
+        // table their VDL loads. TDORT_NO_VDL_CLUT=1: ignore VDL colours.
+        static const bool no_clut = std::getenv("TDORT_NO_VDL_CLUT") != nullptr;
+        if (!no_clut) {
+            std::vector<uint32_t> t = parse_vdl_clut(arg(0), arg(1));
+            if (!t.empty()) vdl_clut_[it.num] = std::move(t);
+        }
         c.r[0] = uint32_t(it.num);
     };
     v[gvSetVDL]            = [this](Cpu*) {                // SetVDL(screen, vdl item) -> previous VDL
@@ -493,7 +579,13 @@ void Portfolio::install_other_folios() {
     av[-42] = [this](Cpu*) { c.r[0] = audio_ticks(); };                          // GetAudioTime()
     av[-15] = [this](Cpu*) { c.r[0] = audio_rate_; };                            // GetAudioRate() (16.16 Hz)
     av[-16] = [this](Cpu*) { c.r[0] = uint32_t(((44100ull << 16) + audio_rate_ / 2) / audio_rate_); };   // GetAudioDuration(): sample frames per tick
-    av[-19] = [this](Cpu*) { c.r[0] = 0; };                                      // OwnAudioClock()
+    // OwnAudioClock() returns an item (the owner key for SetAudioRate and
+    // DisownAudioClock); 0 reads as failure: Wing Commander III printed
+    // "Clock failed." and stopped at frame 130.
+    av[-19] = [this](Cpu*) {
+        if (!audio_clock_owner_ || !item(audio_clock_owner_)) audio_clock_owner_ = audio_new(8 /*kAuTuning: a plain audio item*/, "AudioClock");
+        c.r[0] = uint32_t(audio_clock_owner_);
+    };
     av[-20] = [this](Cpu*) { c.r[0] = 0; };                                      // DisownAudioClock()
     av[-18] = [this](Cpu*) { c.r[0] = cue_signal(int32_t(arg(0))); };            // GetCueSignal(cue)
     av[-17] = [this](Cpu*) { audio_sleep_until(arg(1)); };                       // SleepUntilTime(cue, time)
@@ -520,12 +612,18 @@ void Portfolio::install_other_folios() {
     mv[-1] = [this](Cpu*) { c.r[0] = uint32_t((uint64_t(arg(0)) * arg(1)) >> 16); };                        // MulUF16
     mv[-2] = [this](Cpu*) { c.r[0] = uint32_t((int64_t(int32_t(arg(0))) * int32_t(arg(1))) >> 16); };       // MulSF16
     mv[-3] = [this, udiv](Cpu*) { c.r[0] = udiv(arg(0), arg(1), nullptr); };                                 // DivUF16(d1, d2)
+    // The remainder pointer is read before r0 takes the quotient: reading it
+    // afterwards stored the remainder at the quotient's address, which in
+    // Shadow: War of Succession wrote over its own code every frame.
+    // The remainder is also returned in r1, as the OS routine does.
     mv[-4] = [this, udiv](Cpu*) {                                                                            // DivRemUF16(*rem, d1, d2)
-        uint32_t rem = 0; c.r[0] = udiv(arg(1), arg(2), &rem); if (arg(0)) w32(arg(0), rem);
+        const uint32_t p = arg(0);
+        uint32_t rem = 0; c.r[0] = udiv(arg(1), arg(2), &rem); c.r[1] = rem; if (p) w32(p, rem);
     };
     mv[-5] = [this, sdiv](Cpu*) { c.r[0] = uint32_t(sdiv(int32_t(arg(0)), int32_t(arg(1)), nullptr)); };    // DivSF16(d1, d2)
     mv[-6] = [this, sdiv](Cpu*) {                                                                            // DivRemSF16(*rem, d1, d2)
-        int32_t rem = 0; c.r[0] = uint32_t(sdiv(int32_t(arg(1)), int32_t(arg(2)), &rem)); if (arg(0)) w32(arg(0), uint32_t(rem));
+        const uint32_t p = arg(0);
+        int32_t rem = 0; c.r[0] = uint32_t(sdiv(int32_t(arg(1)), int32_t(arg(2)), &rem)); c.r[1] = uint32_t(rem); if (p) w32(p, uint32_t(rem));
     };
     mv[-7] = [this, udiv](Cpu*) { c.r[0] = udiv(0x10000u, arg(0), nullptr); };                               // RecipUF16
     mv[-8] = [this, sdiv](Cpu*) { c.r[0] = uint32_t(sdiv(0x10000, int32_t(arg(0)), nullptr)); };            // RecipSF16

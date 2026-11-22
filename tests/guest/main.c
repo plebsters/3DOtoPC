@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
     u32 t0 = SampleSystemTime();
     CHECK(5, WaitSignal(sig) == sig);
     u32 t1 = SampleSystemTime();
-    CHECK(5, t1 > t0);
+    CHECK(5, t1 >= t0);                               /* r0 is the seconds count (microseconds in r1) */
 
     /* 6-8: files */
     Item f = OpenDiskFile("data/TEST.BIN");          /* relative + case-insensitive */

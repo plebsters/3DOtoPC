@@ -579,8 +579,22 @@ static void watch_check(Runtime& rt, const char* what) {
     static uint32_t last = 0; static bool init = false;
     if (!addr || addr + 4 > kRamEnd) return;
     const uint32_t v = load_be32(&rt.mem.ram[addr]);
-    if (!init) { init = true; last = v; rt.log("watch %08X: %08X at the first OS call", addr, v); return; }
-    if (v != last) { rt.log("watch %08X: %08X -> %08X before %s (pc=%08X lr=%08X)", addr, last, v, what, rt.cpu.r[15], rt.cpu.r[14]); last = v; }
+    if (!init) {
+        init = true; last = v; rt.log("watch %08X: %08X at the first OS call", addr, v);
+        return;
+    }
+    if (v != last) {
+        // When the word is in recompiled code, the memory tracker also knows
+        // who wrote there first (a guest pc, or an OS call).
+        const uint32_t g = addr >> kGranuleShift;
+        char by[96] = "";
+        if (rt.mem.granule_dirty[g])
+            std::snprintf(by, sizeof by, "; code first overwritten by %s%08X", rt.mem.dirty_by[g] == 0xFFFFFFFFu ? "the OS " : "pc ",
+                          rt.mem.dirty_by[g]);
+        rt.log("watch %08X: %08X -> %08X before %s (pc=%08X lr=%08X)%s", addr, last, v, what, rt.cpu.r[15], rt.cpu.r[14], by);
+        if (rt.mem.granule_dirty[g] && rt.mem.dirty_by[g] == 0xFFFFFFFFu && rt.mem.dirty_call[g]) rt.log("      (during %s)", rt.mem.dirty_call[g]);
+        last = v;
+    }
 }
 
 // Time the OS itself would spend on a call: Portfolio enters the kernel
@@ -598,10 +612,18 @@ bool Runtime::handle_swi(uint32_t comment, uint32_t pc) {
     { char w[32]; std::snprintf(w, sizeof w, "SWI %X", comment); watch_check(*this, w); }
     auto it = swis_.find(comment);
     if (it == swis_.end()) {
+        // A folio number of 16 or more names no folio (the kernel would end the
+        // task). Such "SWIs" are data the game runs through: Lost Eden calls a
+        // function by way of two path strings in front of it ("ED/C/VIRGIN"),
+        // whose bytes decode as conditional SWIs; on the console they don't
+        // run. Registers are left alone for those, so the function still gets
+        // its argument in r0. TDORT_OLD_BADSWI=1: return 0 for them too.
+        static const bool old_bad = std::getenv("TDORT_OLD_BADSWI") != nullptr;
+        const bool no_folio = (comment >> 16) >= 16 && !old_bad;
         if (unknown_swis_.insert(comment).second)
-            log("unimplemented SWI 0x%06X at %08X (r0=%08X r1=%08X) -> returning 0",
-                comment, pc, cpu.r[0], cpu.r[1]);
-        cpu.r[0] = 0;
+            log("unimplemented SWI 0x%06X at %08X (r0=%08X r1=%08X lr=%08X sp=%08X) -> %s",
+                comment, pc, cpu.r[0], cpu.r[1], cpu.r[14], cpu.r[13], no_folio ? "no such folio, ignored" : "returning 0");
+        if (!no_folio) cpu.r[0] = 0;
         return false;
     }
     ++it->second.calls;

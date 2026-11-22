@@ -141,8 +141,14 @@ void Portfolio::task_exit(HleTask& t, const char* why) {
     if (t.owned_stack) {
         uint32_t s = t.owned_stack;
         if (!allocs_.count(s)) {   // the tag may hold the top of the stack rather than its base
+            // ...but only a block of the stack's size is the stack. Star
+            // Control II's threads free their own stacks; one stack-size below
+            // the tag's value lay a 1600-byte block holding its memory
+            // manager's handle table, which this freed and handed out again.
             const uint32_t size = r32(t.addr + task::StackSize);
-            if (allocs_.count(s - size)) s -= size; else s = 0;
+            auto b = allocs_.find(s - size);
+            static const bool loose = std::getenv("TDORT_OLD_STACK_FREE") != nullptr;
+            if (b != allocs_.end() && (loose || b->second == ((size + 15) & ~15u))) s -= size; else s = 0;
         }
         if (s) free_mem(s);
         t.owned_stack = 0;
@@ -246,6 +252,7 @@ int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t p
     int32_t exit_msg = 0;
     bool has_pc = false;
     each_tag(tags, [&](uint32_t t, uint32_t a) {
+        if (rt.cfg.trace) rt.log("CreateTask \"%s\" tag %u = %08X", name.c_str(), t, a);
         switch (t) {
         case kTagTaskPc: pc = a; has_pc = true; break;
         case kTagTaskStackSize: stack_size = a; break;
@@ -263,6 +270,16 @@ int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t p
         return kErrNotSupported;
     }
     if (!stack_size) stack_size = 4096;
+    // CREATETASK_TAG_ALLOCDTHREADSP names the thread's stack, for the kernel to
+    // free when the thread dies. Star Control II (an older SDK) passes other
+    // values with tag 24: code addresses, and once its memory manager's handle
+    // table, which was then freed while still in use. Only a value inside the
+    // thread's stack is taken as the stack. TDORT_OLD_STACK_FREE=1: any value.
+    if (owned_stack && sp && std::getenv("TDORT_OLD_STACK_FREE") == nullptr &&
+        !(owned_stack >= sp - stack_size && owned_stack <= sp)) {
+        if (rt.cfg.trace) rt.log("CreateTask \"%s\": tag 24 value %08X is not its stack (%08X-%08X), ignored", name.c_str(), owned_stack, sp - stack_size, sp);
+        owned_stack = 0;
+    }
     if (!sp) {
         // Room below the stack: the real kernel grows a thread's stack into
         // free memory beneath it when the thread runs past its limit

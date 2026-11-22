@@ -10,7 +10,7 @@
 #        powershell -ExecutionPolicy Bypass -File Install-Prerequisites.ps1 [-SkipDotNet]
 
 [CmdletBinding()]
-param([switch]$SkipDotNet)
+param([switch]$SkipDotNet, [switch]$Installed)   # -Installed: run from the installed app (Start menu / Setup)
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -25,6 +25,7 @@ if (-not (Test-Admin)) {
     Write-Host 'Administrator rights are needed; Windows will ask for permission...'
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
     if ($SkipDotNet) { $argList += '-SkipDotNet' }
+    if ($Installed) { $argList += '-Installed' }
     try { Start-Process powershell.exe -Verb RunAs -ArgumentList $argList }
     catch { Write-Host 'Permission was not granted; nothing was installed.' -ForegroundColor Red; Read-Host 'Press Enter to close' | Out-Null }
     exit
@@ -159,7 +160,11 @@ if ($failed) {
 } else {
     Write-Host 'All set.' -ForegroundColor Green
     if ($rebootNeeded) { Write-Host 'Restart Windows before building, as the installer recommended.' -ForegroundColor Yellow }
-    Write-Host 'Next: double-click Build-App.bat (builds the app), or drag a game onto Convert-3DO.bat.'
-    Write-Host 'Open a NEW window for those so they see the updated PATH.'
+    if ($Installed) {
+        Write-Host 'Next: start 3DO to PC from the Start menu and convert a game.'
+    } else {
+        Write-Host 'Next: double-click Build-App.bat (builds the app), or drag a game onto Convert-3DO.bat.'
+        Write-Host 'Open a NEW window for those so they see the updated PATH.'
+    }
 }
 Read-Host 'Press Enter to close' | Out-Null

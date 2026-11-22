@@ -26,6 +26,22 @@ namespace tdort {
 using namespace abi;
 
 static constexpr uint32_t kBlock = 2048;
+
+// A 3DO chunk file starts with a 4-character type and a 32-bit size that
+// fits in the file ('SHDR' 000000F4, 'CCB ' 00000050, ...).
+static bool looks_chunked(HleItem& f) {
+    if (!f.fp || f.file_size < 16) return false;
+    uint8_t h[8] = {};
+    const long pos = std::ftell(f.fp);
+    std::fseek(f.fp, 0, SEEK_SET);
+    const size_t got = std::fread(h, 1, 8, f.fp);
+    std::fseek(f.fp, pos, SEEK_SET);
+    if (got != 8) return false;
+    for (int i = 0; i < 4; ++i)
+        if (!(std::isalnum(h[i]) || h[i] == ' ' || h[i] == '_')) return false;
+    const uint32_t size = load_be32(h + 4);
+    return size >= 8 && size <= f.file_size;
+}
 // Stream structure (filestream.h) fields kept up to date for the guest.
 static constexpr uint32_t kStSize = 56, kStBlockSize = 28, kStBlockCount = 32, kStFileLength = 36, kStCursor = 40;
 
@@ -723,6 +739,18 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
 #endif
         size_t got = len ? std::fread(buf.data(), 1, len, f.fp) : 0;
         (void)got;
+        // Past the file's last block a real disc gives the next file's blocks,
+        // and 3DO data files are chunk files ("FILL" 0000BF0C ...). Stream
+        // parsers walk a whole buffer by chunk sizes: Cowboy Casino's animation
+        // streamer read zeros there as a chunk of size 0 and looped forever.
+        // For a chunk file the rest of the read shows as one FILL chunk, which
+        // streamers skip. TDORT_OLD_EOF_ZERO=1: plain zeros.
+        static const bool old_eof = std::getenv("TDORT_OLD_EOF_ZERO") != nullptr;
+        if (!old_eof && len < rlen && rlen - len >= 16 && looks_chunked(f)) {
+            const uint32_t fill = rlen - len;
+            std::memcpy(&buf[len], "FILL", 4);
+            store_be32(&buf[len + 4], fill);
+        }
         rt.mem.write_block(rbuf, buf.data(), rlen);   // invalidates any recompiled code it overwrites
         recent_reads_.push_back({f.guest_path, offset, rlen, rbuf, frame_no_});
         if (std::getenv("TDORT_LOG_READS"))

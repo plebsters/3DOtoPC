@@ -36,6 +36,32 @@ then builds the WPF app (if the .NET 8 SDK is installed) into **`dist\`**:
 `3DO to PC.exe` (the app), `3DO to PC CLI.exe` (command line), `tdocore.dll` and `runtime\`.
 Keep those together; copy the whole `dist\` folder if you move it.
 
+## Windows installer
+
+Double-click **`Build-Installer.bat`** to make **`installer\Output\3DO2PC-<version>-Setup.exe`**:
+one file that installs 3DO to PC like any other Windows program. It runs `Build-App.bat`, then
+packs `dist\` with **Inno Setup 6** (free; if it's missing, the script offers to install it
+with winget). Give a version as the first argument (`Build-Installer.bat 1.2`), or it uses
+today's date. The script is `installer\3DO2PC.iss`.
+
+What Setup does:
+
+- Installs for the current user by default, in `%LOCALAPPDATA%\Programs\3DO to PC` (no
+  administrator rights needed); it also offers an all-users install in Program Files.
+- Adds Start-menu shortcuts for **3DO to PC**, **3DO Launcher**, the converted-games folder,
+  the tool setup and the uninstaller, and optional desktop shortcuts.
+- Creates a `games\` folder next to the apps (the launcher looks there first) and a `cache\`
+  folder for the compiled runtime, both writable.
+- Checks for Visual Studio C++ Build Tools and the .NET desktop runtime (8 or newer). If
+  either is missing, its last page offers to run `Install-Prerequisites.ps1`, which asks for
+  administrator rights and downloads only what is missing. It's also in the Start menu as
+  "Install the tools for converting games".
+- Upgrades an older install in place. Uninstalling removes the program and its cache but
+  keeps the games you converted.
+
+The GitHub build makes the same installer (artifact **3DO2PC-windows-setup**), and a version
+tag attaches it to the release next to the zip.
+
 ## Multi-disc games
 
 Drop disc 1 on **Convert-3DO.bat**: discs named like `Game (Disc 1 of 2).cue` find their
@@ -146,8 +172,9 @@ double-click, Enter, or the A button on an Xbox controller.
 - **Windows package** builds everything `Build-App.bat` builds (converter app, launcher,
   CLI, `tdocore.dll`, runtime) and attaches it to the run as **3DO2PC-windows**
   (Actions tab → the run → Artifacts).
+- It also packs the installer (`3DO2PC-<version>-Setup.exe`, artifact **3DO2PC-windows-setup**).
 - Pushing a tag such as `v1.0` (`git tag v1.0 && git push origin v1.0`) also creates a
-  GitHub release with `3DO2PC-v1.0-windows.zip`.
+  GitHub release with `3DO2PC-v1.0-windows.zip` and `3DO2PC-1.0-Setup.exe`.
 
 `.gitignore` keeps build output, converted games and disc images out of the repository.
 
@@ -355,7 +382,7 @@ Environment variables:
 | `TDORT_TRACE_ALL=1` | with `--trace`: also log repeated identical calls |
 | `TDORT_TRACE_READS=1` | log every file read |
 | `TDORT_MEM_TRACE=1` | log allocations and frees of 1 KB and more (`=all`: every size) |
-| `TDORT_WATCH=2AFA64` | log when that memory word changes (checked at each OS call) |
+| `TDORT_WATCH=2AFA64` | log when that memory word changes (checked at each OS call); in code, also who first wrote over it |
 | `TDORT_BREAK=3C6C8,2C27C` | log the frame, the registers and 8 words at the stack each time code reaches one of those addresses |
 | `TDORT_BREAK_DUMP=2ABE20` | with `TDORT_BREAK`, also log 32 words at that address (or `r4`: at the address in that register) |
 | `TDORT_NULLREAD=1` | when a disc read goes to address 0, log the caller chain |
@@ -371,6 +398,18 @@ Environment variables:
 | `TDORT_OLD_MATH=1` | `multiply.dsp` and the other arithmetic instruments add their inputs, as before |
 | `TDORT_PRE0_BGND=1` | a cel's preamble BGND bit also keeps its 000 pixels opaque (old behaviour) |
 | `TDORT_OLD_DEFINE_SAMPLE=1` | `DefineSampleHere` plays the sound from the file image instead of a copy |
+| `TDORT_OLD_BADSWI=1` | an SWI naming no folio (16 or more) returns 0 in r0 instead of being ignored |
+| `TDORT_OLD_WHERE_FRAMES=1` | `WhereAttachment` returns sample frames instead of a byte offset |
+| `TDORT_NO_VDL_CLUT=1` | colour words in a display list (VDL) are ignored; the standard ramp is used |
+| `TDORT_OLD_FB_MSB=1` | the cel engine leaves frame-buffer bit 15 clear instead of writing the pixel's P bit |
+| `TDORT_OLD_ALLOC_LOW=1` | large allocations take the lowest free block instead of preferring memory above 512 KB |
+| `TDORT_SMALL_ALLOC_FLOOR_KB=0` | no 32 KB floor for small allocations (the size in KB; 0 turns it off) |
+| `TDORT_OLD_SCREEN_DELETE=1` | deleting a screen group keeps its screens, bitmaps and frame buffers |
+| `TDORT_OLD_CSG_BITMAPS=1` | `CreateScreenGroup` makes as many bitmaps per screen as asked, instead of one as the OS does |
+| `TDORT_OLD_STACK_FREE=1` | a thread's tag 24 value is freed as its stack when it dies, whatever it points to |
+| `TDORT_OLD_EOF_ZERO=1` | a disc read past the end of a chunk file reads zeros instead of a `FILL` chunk |
+| `TDORT_OLD_STACK_GROW=1` | memory a growing stack reaches is not kept for the task |
+| `TDORT_OLD_SAMPLETIME=1` | `SampleSystemTime` returns its two values in the old order |
 | `TDORT_CEL_TRACE=1` | log every cel drawn, each `DrawCels` target (bitmap, size, clip) and each clip change, to stderr |
 | `TDORT_CEL_CYCLES=0.5` | CPU clocks lost per pixel the cel engine draws (default 0.5; 0 = drawing is free) |
 | `TDORT_N_CLOCKS=2` | clocks per non-sequential memory access (default 2, from the datasheet; 1 = faster memory, games get more CPU) |
@@ -504,6 +543,86 @@ Fixes found by running games (each a difference from the real OS):
   the buffer was reused the engine played whatever was written over it (a click at every
   loop, about four a second). `DefineSampleHere` now copies the sound, as `CreateSample`
   with an image already did (`TDORT_OLD_DEFINE_SAMPLE=1`: play it from the image).
+* Wing Commander III printed "Clock failed." at start-up: `OwnAudioClock` returned 0, but
+  it returns an item (the owner key for `SetAudioRate` and `DisownAudioClock`). It now
+  returns one, and the game sets its clock (225 Hz).
+* Wing Commander III then stayed black at frame 130. Its movie player waits until
+  `WhereAttachment` reaches the end of a 2940-byte sound buffer; the call returned a
+  position in sample frames (at most 1470), so the wait never ended. It now returns a byte
+  offset, as the folio does (frames times the bytes per frame as the instrument reads the
+  data; `TDORT_OLD_WHERE_FRAMES=1`: frames as before). The intro movies now play.
+* Wing Commander III's movies looked like coloured noise. Their frames are stored for a
+  colour table that the game's display list (VDL) loads, not for the standard ramp, and VDL
+  colours were ignored. `SubmitVDL` now reads the list's colour words line by line and the
+  screen is shown through that table (a 0 pixel stays black, the background colour);
+  lists that load the standard ramp change nothing (`TDORT_NO_VDL_CLUT=1`: ignore VDL
+  colours).
+* Wing Commander III's movies still had false-colour speckles and outlines (faces, sky,
+  the Origin logo). Each frame marks the pixels whose colour is not in the scene's table
+  by setting their top bit, and the display shows those pixels' RGB directly instead of
+  looking them up. The cel engine dropped that bit when it wrote the frame buffer. It now
+  keeps the pixel's P bit (as decoded, before the CCB's P-mode override) in bit 15, and a
+  screen shown through a VDL colour table bypasses the table for such pixels
+  (`TDORT_OLD_FB_MSB=1`: bit 15 stays clear). The intro movies now look right.
+* Theme Park's world map was covered in garbage (rows of orange and black stripes). The
+  game loads its sprite data, then adds the data's address to each offset in the sprite
+  table, but only to offsets smaller than that address. On the console the OS fills low
+  memory, so the data lands high and every offset gets moved; here the 480 KB block was
+  given out at 0x1230, so all but the first 32 sprites pointed into the wrong place.
+  Allocations of 64 KB or more now come from above the first 512 KB of DRAM when there is
+  room there, and from lower memory only when there isn't (`TDORT_OLD_ALLOC_LOW=1`: lowest
+  fit as before).
+* Lost Eden stopped at frame 10. It calls a function by way of two path strings stored in
+  front of it ("ED/C/VIRGIN"), whose bytes decode as conditional SWIs with folio numbers
+  that don't exist; on the console they don't run. The runtime answered them by zeroing
+  r0, which was the function's argument. SWIs whose folio number is 16 or more are now
+  ignored and leave the registers alone (`TDORT_OLD_BADSWI=1`: zero r0 as before).
+* Olympic Summer Games (and Olympic Soccer, same engine) waited forever at start-up. They
+  size a pool from AvailMem and then take whatever is left in 52-byte blocks until
+  AllocMem fails, so the SDK's CreateThread couldn't get a 1 KB stack afterwards. The
+  first small (< 256 bytes) request that would leave less than 32 KB of DRAM is now
+  refused, once, which ends that loop; ordinary requests still get the memory
+  (`TDORT_SMALL_ALLOC_FLOOR_KB=0`: no floor).
+* Snow Job looped forever at start-up, then ran out of VRAM after the intro. Games walk a
+  screen group's `sg_ScreenList`, which was missing; and `DeleteScreenGroup` did nothing,
+  so each scene's frame buffers stayed allocated. Screen groups now carry their screen
+  list, and deleting a group (DeleteScreenGroup or DeleteItem) deletes its screens and
+  bitmaps and frees the frame buffers the OS allocated (`TDORT_OLD_SCREEN_DELETE=1`: keep).
+* Star Control II crashed at start-up and then on a black screen; it now reaches gameplay.
+  Two causes. First, it asks `CreateScreenGroup` for 4 bitmaps per screen but passes one
+  buffer per screen. The OS makes one bitmap per screen whatever the count says (its
+  screen code forces it to 1), so screen n takes entry n of the buffer array. The runtime
+  honoured the count, gave the second screen garbage addresses, and clearing that "screen"
+  through the SPORT device wiped the game's code (`TDORT_OLD_CSG_BITMAPS=1`: honour it).
+  Second, its threads are created with tag 24 holding values that aren't stacks (code
+  addresses, once its memory manager's handle table). Tag 24 is "free this stack when the
+  thread dies", so the table was freed while in use, handed out again, and its memory
+  manager fell apart. The tag is now taken as a stack only when it points into the
+  thread's stack (`TDORT_OLD_STACK_FREE=1`: any value).
+* Shadow - War of Succession froze on the difficulty menu when a button was pressed, and
+  other games could get stray writes from the same cause. The math folio's `DivRemSF16`
+  and `DivRemUF16` put the quotient in r0 and then took r0 as the address for the
+  remainder, so the remainder went to the quotient's address. Shadow divides a timer value
+  every frame, and the remainders landed across its own code; once its input queue pointer
+  was hit, the joypad task looped forever. The remainder now goes where the caller asked
+  (and is also returned in r1, as the OS routine does). Shadow now reaches the fights.
+* Cowboy Casino stopped during the first poker hand. Its animation streamer reads a stream
+  file 96 KB at a time and walks each buffer by the chunk sizes. The last read went past
+  the end of the file, which read as zeros, so the streamer met a chunk of size 0 and
+  never moved on. On a real disc that part of the buffer holds the next file's blocks,
+  which are chunks as well. For a chunk file ("SHDR", "CCB ", ...) the part past the end
+  now holds one `FILL` chunk, which streamers skip (`TDORT_OLD_EOF_ZERO=1`: zeros).
+* VR Stalker crashed after the intro: its program's stack grew 32 KB below the program
+  into free memory, `AllocMem` then gave that memory out and its zero fill wiped the
+  stack. When a stack grows, the memory it reaches is now kept for that task
+  (`TDORT_OLD_STACK_GROW=1`: not kept).
+* Primal Rage stopped at frame 60: `SampleSystemTime` returned the time in the wrong
+  registers (seconds in r0, microseconds in r1, as the OS does), so the game's timing
+  loop never saw time pass (`TDORT_OLD_SAMPLETIME=1`: the old order).
+* BattleSport could not be converted ("cannot write ...eye.anim\new"): the disc has two
+  names under art/anims that differ only in case, which Windows can't store side by side.
+  The console uses the first match, so the converter now keeps the first and lists the
+  skipped ones in the conversion log.
 * Doom: its game screens are 320x200. The display always showed 240 lines from the screen's
   buffer, so the bottom 40 lines were the start of the next buffer in memory (the top of
   the view again, under the status bar). A screen now shows as many lines as its bitmap

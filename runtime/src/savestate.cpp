@@ -28,7 +28,7 @@ struct StateIO {
         int64_t at = open ? int64_t(std::ftell(it.fp)) : 0;
         a(open); a(at);
         a(it.device); a(it.reply_port); a(it.msg_item); a(it.msg_buffer); a(it.msg_buffer_size);
-        a(it.queue); a(it.signal); a(it.in_port); a(it.children); a(it.buffer); a(it.sem_owner); a(it.sem_count);
+        a(it.queue); a(it.signal); a(it.in_port); a(it.children); a(it.buffer); a(it.owns_buffer); a(it.sem_owner); a(it.sem_count);
         a(it.owner_task); a(it.writable); a(it.block_size);
         if (!a.saving) {
             it.fp = nullptr;
@@ -97,7 +97,7 @@ struct StateIO {
         a(au.cues_fired); a(au.last_tweak);
     }
     static void io(StateAr& a, Gfx& g) {
-        a(g.r_); a(g.display_lines_); a(g.display_addr_); a(g.lrform); a(g.cels_drawn); a(g.pixels_written);
+        a(g.r_); a(g.display_lines_); a(g.display_addr_); a(g.clut_); a(g.lrform); a(g.cels_drawn); a(g.pixels_written);
     }
     static void io(StateAr& a, Portfolio& p) {
         // Files and streams open now are closed first: loading replaces them.
@@ -106,13 +106,13 @@ struct StateIO {
             for (auto& kv : p.streams_) if (kv.second.fp) std::fclose(kv.second.fp);
             p.streams_.clear();
         }
-        a(p.audio_rate_); a(p.audio_rate_ticks_); a(p.audio_rate_frame_); a(p.font_);
+        a(p.audio_rate_); a(p.audio_rate_ticks_); a(p.audio_rate_frame_); a(p.audio_clock_owner_); a(p.font_);
         p.codecs_io(a);
         a(p.deliver_code_); a(p.final_word_); a(p.last_input_frame_); a(p.recent_reads_);
         a(p.slice_start); a(p.mt);
         a(p.templates_); a(p.template_attach_); a(p.ins_template_); a(p.abandoned_); a(p.putc_loop_);
         a(p.knobs_); a(p.cue_owner_); a(p.knob_name_strings_); a(p.audio_device_);
-        a(p.vdl_buffer_); a(p.screen_vdl_); a(p.screen_vdl_buffer_); a(p.dirs_); a(p.streams_);
+        a(p.vdl_buffer_); a(p.screen_vdl_); a(p.screen_vdl_buffer_); a(p.vdl_clut_); a(p.dirs_); a(p.streams_);
         a(p.last_load_bytes_); a(p.cd_free_pos_); a(p.vbl_io_);
         a(p.tasks_); a(p.cur_); a(p.blocked_streak_); a(p.thread_exit_trap_); a(p.idle_trap_); a(p.io_quick_); a(p.idle_);
         a(p.phantom_children_); a(p.timed_signals_); a(p.cue_signals_);
@@ -149,7 +149,7 @@ template <class T> void StateAr::io_struct(T& v) { StateIO::io(*this, v); }
 
 // File layout: magic, version, the game's LaunchMe hash, the frame, then the data.
 static constexpr char kMagic[8] = {'3', 'D', 'O', 'S', 'T', 'A', 'T', 'E'};
-static constexpr uint32_t kVersion = 1;
+static constexpr uint32_t kVersion = 3;
 
 static uint64_t checksum(const uint8_t* p, size_t n) {
     uint64_t h = 1469598103934665603ull;

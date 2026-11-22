@@ -735,4 +735,19 @@ void Audio::mix(int16_t* out, int frames) {
     frames_out_ += uint64_t(frames);
 }
 
+double Audio::attachment_bytes_per_frame(int32_t att) {
+    const Attachment* a = attachment(att);
+    const Sample* s = a ? sample(a->sample) : nullptr;
+    if (!s || !s->frames) return 1.0;
+    const Instrument* in = instrument(a->ins);
+    if (in && (in->data_bits || in->data_sdx2 || in->data_adp4 || in->data_duck)) {
+        const int ch = (in->stereo || (in->data_adp4 && std::getenv("TDORT_ADP_STEREO"))) ? 2 : std::max(1, s->channels);
+        if (in->data_duck) return 1.0;
+        if (in->data_sdx2) return double(ch);
+        if (in->data_adp4) return 0.5 * ch;
+        return double(std::max(1, in->data_bits / 8) * ch);
+    }
+    return double(s->bytes) / double(s->frames);
+}
+
 } // namespace tdort

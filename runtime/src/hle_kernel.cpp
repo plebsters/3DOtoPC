@@ -169,6 +169,21 @@ int32_t Portfolio::delete_item(int32_t num) {
         task_exit(*t, "deleted");
         return 0;
     }
+    // A screen group goes with its screens and bitmaps, and the frame buffers
+    // the OS allocated for them return to VRAM. Snow Job makes a new group for
+    // each scene and deletes the old one; with the buffers kept, VRAM ran out
+    // after the intro. TDORT_OLD_SCREEN_DELETE=1: keep them.
+    if ((it->kind == ItemKind::ScreenGroup || it->kind == ItemKind::Screen) && !std::getenv("TDORT_OLD_SCREEN_DELETE")) {
+        const std::vector<int32_t> kids = it->children;
+        it->children.clear();
+        for (int32_t k : kids) delete_item(k);
+        it = item(num);
+        if (!it) return 0;
+    }
+    if (it->kind == ItemKind::Bitmap && it->owns_buffer && it->buffer) {
+        free_mem(it->buffer);
+        it->owns_buffer = false;
+    }
     if (it->fp) { std::fclose(it->fp); it->fp = nullptr; }
     if (it->subsys == kSubsysAudio) audio_deleted(*it);
     if (it->heap_owned) free_mem(it->addr);
@@ -239,6 +254,25 @@ static void give(std::map<uint32_t, uint32_t>& fl, uint32_t a, uint32_t size) {
     }
 }
 
+// Takes the free parts of [lo, hi) out of a free list; the pieces taken are
+// returned (start, size). Parts already in use are left alone.
+static std::vector<std::pair<uint32_t, uint32_t>> take_range(std::map<uint32_t, uint32_t>& fl, uint32_t lo, uint32_t hi) {
+    std::vector<std::pair<uint32_t, uint32_t>> got;
+    if (lo >= hi) return got;
+    auto it = fl.upper_bound(lo);
+    if (it != fl.begin()) --it;
+    while (it != fl.end() && it->first < hi) {
+        const uint32_t a = it->first, e = it->first + it->second;
+        if (e <= lo) { ++it; continue; }
+        const uint32_t s0 = std::max(a, lo), s1 = std::min(e, hi);
+        it = fl.erase(it);
+        if (a < s0) fl.emplace(a, s0 - a);
+        if (s1 < e) it = fl.emplace(s1, e - s1).first;
+        got.emplace_back(s0, s1 - s0);
+    }
+    return got;
+}
+
 // Rebuilds each bank's free-page bitmap from the allocator's free ranges
 // (a page counts as free when it lies wholly inside one). Doom sizes its
 // memory pool from availMem(); with no free pages reported it quit with
@@ -296,12 +330,63 @@ uint32_t Portfolio::alloc(uint32_t size, uint32_t flags) {
     static const bool split = std::getenv("TDORT_ALLOC_FLAT") == nullptr;
     const bool small = split && sz <= 8192;
     const bool top = (flags & kMemFromTop) || small;
+    // Large blocks come from above the first 512 KB of DRAM when they fit
+    // there: on the console the OS occupies low memory, so a game's big data
+    // never starts near address 0. Theme Park relocates the offsets in a
+    // sprite table only where they are below the data's address; its sprite
+    // data at 0x1230 left most offsets unrelocated and drew garbage.
+    // TDORT_OLD_ALLOC_LOW=1: lowest fit as before.
+    static const bool old_low = std::getenv("TDORT_OLD_ALLOC_LOW") != nullptr;
+    auto take_high_first = [&](std::map<uint32_t, uint32_t>& fl, uint32_t n) -> uint32_t {
+        constexpr uint32_t kLowEnd = 0x80000;
+        for (auto it = fl.begin(); it != fl.end(); ++it) {
+            const uint32_t b = it->first, len = it->second;
+            const uint32_t start = std::max(b, kLowEnd);
+            if (start >= b + len || b + len - start < n) continue;
+            fl.erase(it);
+            if (start > b) fl[b] = start - b;
+            if (start + n < b + len) fl[start + n] = b + len - (start + n);
+            return start;
+        }
+        return take(fl, n);
+    };
     auto pick = [&](std::map<uint32_t, uint32_t>& fl, uint32_t n) {
+        if (align <= 16 && !top && !old_low && n >= 0x10000 && &fl == &free_dram_) return take_high_first(fl, n);
         return align > 16 ? take_aligned(fl, n, align, top) : top ? take_top(fl, n) : take(fl, n);
     };
+    // The last 32 KB of DRAM is not given out in small pieces. Olympic Soccer
+    // and Olympic Summer Games size a pool from AvailMem, then take whatever
+    // is left in 52-byte blocks until AllocMem fails; with nothing left, the
+    // SDK's CreateThread couldn't get a 1 KB stack and the game waited forever
+    // for that thread. Requests of 256 bytes or more can still use it.
+    // TDORT_SMALL_ALLOC_FLOOR_KB sets the size (0: off).
+    static const uint32_t floor_bytes = [] {
+        const char* e = std::getenv("TDORT_SMALL_ALLOC_FLOOR_KB");
+        return (e ? uint32_t(std::strtoul(e, nullptr, 10)) : 32u) * 1024u;
+    }();
+    // A probe loop stops at its first failure, so one refusal is enough; after
+    // it the floor is lifted and ordinary small requests can use that memory.
+    static bool floor_tripped = false;
+    auto dram_ok = [&]() {
+        if (!floor_bytes || floor_tripped || sz >= 256) return true;
+        uint32_t total = 0;
+        for (const auto& [b, n] : free_dram_) total += n;
+        if (total >= sz + floor_bytes) return true;
+        floor_tripped = true;
+        rt.log("AllocMem(%u): the last %u KB of DRAM are kept for larger requests (once)", size, floor_bytes / 1024);
+        return false;
+    };
     if (flags & kMemVram) a = pick(free_vram_, sz);
-    else if (!(a = pick(free_dram_, sz))) a = pick(free_vram_, sz);   // 3DO memory is unified enough
-    if (!a) { if (!quiet_alloc_) rt.log("AllocMem(%u, %08X) failed: out of memory", size, flags); return 0; }
+    else if (!(a = dram_ok() ? pick(free_dram_, sz) : 0) && !(flags & 0x00080000u /*MEMTYPE_DRAM*/))
+        a = pick(free_vram_, sz);   // 3DO memory is unified enough (unless DRAM was asked for)
+    if (!a) {
+        if (!quiet_alloc_) {
+            uint32_t total = 0, largest = 0;
+            for (auto& [b, n] : free_dram_) { total += n; largest = std::max(largest, n); }
+            rt.log("AllocMem(%u, %08X) failed: out of memory (DRAM free %u, largest block %u; lr=%08X)", size, flags, total, largest, c.r[14]);
+        }
+        return 0;
+    }
     allocs_[a] = sz;
     update_free_page_bits();
     if (!tasks_.empty()) alloc_owner_[a] = owning_task(cur());
@@ -469,10 +554,30 @@ void Portfolio::install_kernel_vectors() {
     // below and hands back a lower limit; every other register is kept.
     v[-31] = [this](Cpu*) {
         const uint32_t need = c.r[12];
-        const uint32_t lim = need > 0x1000 + 256 ? need - 256 : 0x1000;
+        const uint32_t lim = (need > 0x1000 + 256 ? need - 256 : 0x1000) & ~15u;
+        const uint32_t old_lim = c.r[10];
         if (lim < c.r[10]) c.r[10] = lim;
+        // The memory the stack now reaches into must not be handed out: VR
+        // Stalker's game program grew its stack 32 KB below its image, then
+        // AllocMem gave it that memory and the zero fill wiped its own stack
+        // (a jump to 0). The free parts are claimed for the task, and go back
+        // when it ends. TDORT_OLD_STACK_GROW=1: don't claim.
+        static const bool old_grow = std::getenv("TDORT_OLD_STACK_GROW") != nullptr;
+        uint32_t claimed = 0;
+        if (!old_grow && lim < old_lim && old_lim <= kRamEnd) {
+            auto& fl = lim >= kVramBase ? free_vram_ : free_dram_;
+            // 32 KB more below the new limit is kept for the next growth, so
+            // small allocations don't settle right under a growing stack.
+            const uint32_t lo = lim > 0x8000 + 0x1000 ? lim - 0x8000 : 0x1000;
+            for (auto [a, n] : take_range(fl, lo, old_lim)) {
+                allocs_[a] = n;
+                alloc_owner_[a] = owning_task(cur());
+                claimed += n;
+            }
+            if (claimed) update_free_page_bits();
+        }
         static int logged = 0;
-        if (logged++ < 3) rt.log("stack of task %s extended: limit now %08X (sp %08X)", cur().name.c_str(), c.r[10], c.r[13]);
+        if (logged++ < 3) rt.log("stack of task %s extended: limit now %08X (sp %08X), %u bytes claimed", cur().name.c_str(), c.r[10], c.r[13], claimed);
     };
     v[-17] = [](Cpu*) {};   // UniversalInsertNode: replaced by ARM code after the folio is made (below)
     // Memory lists: a program's private pools. Their memory comes from the
@@ -1171,7 +1276,17 @@ void Portfolio::install_kernel_swis() {
     });
 
     // --- misc
-    K(kSampleSystemTime, "SampleSystemTime", [this](Cpu*) { c.r[0] = uint32_t(usec()); });
+    // SampleSystemTime(): the seconds of the system clock (the timer device's
+    // microsecond unit) in r0, the microseconds in r1. Returning microseconds
+    // in r0 sent Primal Rage's movie player to sleep for days (it adds a
+    // frame time to {r0, r1} and waits for that clock time). TDORT_OLD_SAMPLETIME=1: old.
+    K(kSampleSystemTime, "SampleSystemTime", [this](Cpu*) {
+        static const bool old_st = std::getenv("TDORT_OLD_SAMPLETIME") != nullptr;
+        const uint64_t us = usec();
+        if (old_st) { c.r[0] = uint32_t(us); return; }
+        c.r[0] = uint32_t(us / 1000000u);
+        c.r[1] = uint32_t(us % 1000000u);
+    });
     K(kReadHwRandom, "ReadHardwareRandomNumber", [this](Cpu*) {
         uint32_t& x = hw_random_;
         x ^= x << 13; x ^= x >> 17; x ^= x << 5;
@@ -1599,6 +1714,8 @@ void Portfolio::timer_io(HleItem& ior, uint32_t info) {
         uint64_t us = want;
         if (cmd == kTimerCmdDelayUntil) { const uint64_t now = usec(); us = want > now ? want - now : 0; }
         const uint32_t frames = uint32_t(std::min<uint64_t>((us + 8333) / 16667, 60u * 3600u));
+        if (rt.cfg.trace) rt.log("timer IO %d: %s %llu us (now %llu) -> %u frames", ior.num, cmd == kTimerCmdDelayUntil ? "until" : "delay",
+                                 (unsigned long long)want, (unsigned long long)usec(), frames);
         if (!io_quick_ && multitasking() && !old_io()) { defer_io(ior, std::max<uint32_t>(frames, 1)); return; }   // SendIO: the caller carries on
         complete_io(ior, 0, 0);
         if (frames == 0) { if (multitasking()) switch_to_next(false); return; }

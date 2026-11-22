@@ -110,6 +110,9 @@ public:
     void add_attachment(int32_t item, const Attachment& a);
     void set_vpp_tables(int32_t ins, const uint16_t* uv, const uint16_t* y);
     void remove(int32_t item);              // any audio item
+    // Bytes of sample data per playback frame of the attachment, as its
+    // instrument reads the data (WhereAttachment reports bytes).
+    double      attachment_bytes_per_frame(int32_t att);
     Sample*     sample(int32_t i)     { auto it = samples_.find(i); return it == samples_.end() ? nullptr : &it->second; }
     Instrument* instrument(int32_t i) { auto it = ins_.find(i); return it == ins_.end() ? nullptr : &it->second; }
     Attachment* attachment(int32_t i) { auto it = atts_.find(i); return it == atts_.end() ? nullptr : &it->second; }
