@@ -73,7 +73,7 @@ Disc 1 is converted; the others are unpacked beside it as `data_disc2`, `data_di
 Converting again removes `data_disc` folders left over from an earlier conversion that are
 not part of this one.
 When the game asks for a file that only another disc has (what happens after "insert
-disc 2"), that disc goes in by itself. If a game does not notice, press **F2** in the game
+disc 2"), that disc goes in by itself. If a game does not notice, press **F4** in the game
 window to put in the next disc. (The 3DO to PC window converts single discs for now.)
 
 ## Batch testing a whole library
@@ -302,9 +302,13 @@ once with its arguments, so the log is the to-do list for that game.
 | L / R | A / S |
 | Play/Pause (Start) | Enter |
 | X (Stop) | Backspace |
-| Next disc | F2 |
+| Next disc | F4 |
 
-An Xbox controller works too (XInput).
+An Xbox controller works too (XInput): D-pad or left stick, A / B / X for 3DO A / B / C,
+LB / RB for L / R, Start for Play and Back for Stop.
+
+Press **F2** in the game window to see this mapping on screen (keyboard and controller side
+by side); press F2 again to hide it.
 
 ### Save states
 
@@ -327,6 +331,8 @@ For testing without a window: `TDORT_STATE_SAVE=<frame>:<slot>` and `TDORT_STATE
 | Key | Does |
 |---|---|
 | F1 | Shows the keys (display and save states) on screen |
+| F2 | Shows the button mapping (keyboard and controller); F2 again hides it |
+| F4 | Puts the next disc of a multi-disc game in the drive |
 | F7 | Window size: 2x, 3x, 4x, 5x, 6x (640x480 up to 1920x1440; limited to what fits the screen) |
 | F8 | Picture shape: **4:3** (black bars), **Pixel perfect** (4:3 at a whole-number size, so every pixel is the same size), **Stretch** to the window |
 | F9 | Look: **Sharp** pixels, **Smooth** (filtered), **Scanlines** (CRT-style dark lines; best at 3x or more) |

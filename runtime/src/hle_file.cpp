@@ -161,12 +161,12 @@ bool Portfolio::resolve(const std::string& guest, std::string& host, std::string
     return true;
 }
 
-// F2 in the game window: the next disc goes in (after the last, disc 1 again).
+// F4 in the game window: the next disc goes in (after the last, disc 1 again).
 void Portfolio::next_disc() {
     disc_root();
     if (discs_.size() < 2) return;
     disc_ = (disc_ + 1) % discs_.size();
-    rt.log("disc %zu is now in the drive (F2)", disc_ + 1);
+    rt.log("disc %zu is now in the drive (F4)", disc_ + 1);
 }
 
 // The disc in the drive: data for disc 1, data_disc2, data_disc3, ... beside it.

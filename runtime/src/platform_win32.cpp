@@ -37,7 +37,8 @@ struct Win32Platform : Platform {
     // (one file for every converted game: %APPDATA%\3DO to PC\display.cfg).
     //   F7  window size 2x..6x        F8  picture shape: 4:3 / pixel-perfect / stretch
     //   F9  look: sharp / smooth / scanlines     F11 or Alt+Enter  fullscreen
-    //   F1  show these keys
+    //   F1  show these keys          F2  show the button mapping (again to hide)
+    //   F4  put in the next disc of a multi-disc game
     // Save states: F5 save, F6 load, F3 choose the slot (1..9).
     enum Fit { Fit43, FitInteger, FitStretch, kFits };
     enum Look { LookSharp, LookSmooth, LookScanlines, kLooks };
@@ -47,6 +48,8 @@ struct Win32Platform : Platform {
     WINDOWPLACEMENT saved_place{sizeof(WINDOWPLACEMENT)};
     std::vector<uint32_t> out;            // the scaled picture, client-sized box
     std::string osd;                      // message shown over the picture
+    int osd_tab = 6;                      // tab stops for the message, in average characters
+    bool controls_shown = false;          // F2 panel is up
     std::chrono::steady_clock::time_point osd_until{};
 
     static std::wstring settings_path() {
@@ -79,9 +82,30 @@ struct Win32Platform : Platform {
         std::fprintf(f, "scale=%d\nfit=%d\nlook=%d\nfullscreen=%d\n", scale, fit, look, fullscreen ? 1 : 0);
         std::fclose(f);
     }
-    void say(const std::string& text, int ms = 2000) {
-        osd = text; osd_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    void say(const std::string& text, int ms = 2000, int tab = 6) {
+        osd = text; osd_tab = tab; controls_shown = false;
+        osd_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
         redraw();
+    }
+    // F2: which key or controller button plays each 3DO button. Stays up until
+    // F2 is pressed again (or another message replaces it).
+    static const char* controls_text() {
+        return "Controls  \xC2\xB7  F2 to close\n"
+               "3DO pad\tKeyboard\tController\n"
+               "D-pad\tArrow keys\tD-pad or left stick\n"
+               "A\tZ\tA\n"
+               "B\tX\tB\n"
+               "C\tC\tX\n"
+               "L  /  R\tA  /  S\tLB  /  RB\n"
+               "Play (Start)\tEnter\tStart\n"
+               "Stop (X)\tBackspace\tBack\n"
+               "Next disc\tF4\n"
+               "Other keys\tF1";
+    }
+    void toggle_controls() {
+        if (controls_shown && !osd.empty()) { osd.clear(); controls_shown = false; redraw(); return; }
+        say(controls_text(), 3600 * 1000, 11);
+        controls_shown = true;
     }
     void redraw() { InvalidateRect(hwnd, nullptr, FALSE); }
 
@@ -128,8 +152,11 @@ struct Win32Platform : Platform {
     bool display_key(uint32_t vk) {
         switch (vk) {
         case VK_F1:
-            say("F5\tSave state (slot " + std::to_string(state_slot) + ")\nF6\tLoad state\nF3\tChange save slot\n"
-                "F7\tWindow size\nF8\tPicture shape\nF9\tLook\nF11\tFullscreen", 6000);
+            say("F2\tButton mapping\nF5\tSave state (slot " + std::to_string(state_slot) + ")\nF6\tLoad state\nF3\tChange save slot\n"
+                "F4\tNext disc\nF7\tWindow size\nF8\tPicture shape\nF9\tLook\nF11\tFullscreen", 6000);
+            return true;
+        case VK_F2:
+            toggle_controls();
             return true;
         case VK_F3:
             state_slot = state_slot % 9 + 1;
@@ -201,7 +228,7 @@ struct Win32Platform : Platform {
         case 'C': bit = PadC; break;          case 'A': bit = PadL; break;
         case 'S': bit = PadR; break;          case VK_BACK: bit = PadX; break;
         case VK_RETURN: bit = PadP; break;
-        case VK_F2: bit = PadNextDisc; break;
+        case VK_F4: bit = PadNextDisc; break;
         }
         keys = down ? (keys | bit) : (keys & ~bit);
     }
@@ -227,7 +254,7 @@ struct Win32Platform : Platform {
         SetFocus(hwnd);
         apply_scale();
         if (fullscreen) { fullscreen = false; set_fullscreen(true); }
-        say("F1  \xC2\xB7  keys", 3000);
+        say("F1  \xC2\xB7  keys      F2  \xC2\xB7  controls", 3000);
         timeBeginPeriod(1);
         return true;
     }
@@ -342,11 +369,11 @@ struct Win32Platform : Platform {
     // The text is drawn once per message and size into a coverage mask, then
     // blended over the picture every frame.
     std::string mask_text;
-    int mask_px = 0, mask_w = 0, mask_h = 0;
+    int mask_px = 0, mask_w = 0, mask_h = 0, mask_tab = 6;
     std::vector<uint8_t> mask;            // text coverage, 0..255
 
-    void build_mask(const std::string& text, int px) {
-        mask_text = text; mask_px = px; mask_w = mask_h = 0; mask.clear();
+    void build_mask(const std::string& text, int px, int tab) {
+        mask_text = text; mask_px = px; mask_tab = tab; mask_w = mask_h = 0; mask.clear();
         const int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), int(text.size()), nullptr, 0);
         std::wstring w(size_t(std::max(0, n)), L'\0');
         if (n > 0) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), int(text.size()), &w[0], n);
@@ -355,7 +382,7 @@ struct Win32Platform : Platform {
         HFONT font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
                                  CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HGDIOBJ old_font = SelectObject(dc, font);
-        DRAWTEXTPARAMS tabs{sizeof tabs, 6, 0, 0, 0};      // tab stops every 6 average characters
+        DRAWTEXTPARAMS tabs{sizeof tabs, tab, 0, 0, 0};    // tab stops every `tab` average characters
         const UINT flags = DT_LEFT | DT_TOP | DT_NOPREFIX | DT_EXPANDTABS | DT_TABSTOP;
         RECT r{0, 0, 4096, 0};
         DrawTextExW(dc, &w[0], int(w.size()), &r, flags | DT_CALCRECT, &tabs);
@@ -394,7 +421,7 @@ struct Win32Platform : Platform {
         const double left_ms = std::chrono::duration<double, std::milli>(osd_until - now).count();
         const double fade = std::min(1.0, left_ms / 300.0);            // fades out over the last 0.3 s
         const int px = std::clamp(bh / 32, 13, 34);                      // text size follows the picture
-        if (osd != mask_text || px != mask_px) build_mask(osd, px);
+        if (osd != mask_text || px != mask_px || osd_tab != mask_tab) build_mask(osd, px, osd_tab);
         if (mask.empty()) return;
         const int pad_x = px * 3 / 4, pad_y = px / 2, margin = std::max(6, px / 2);
         const int radius = std::max(4, px / 2);
