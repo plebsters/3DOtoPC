@@ -7,6 +7,7 @@
 #include <xinput.h>
 #include <mmsystem.h>
 #include "tdort/platform.h"
+#include "png_write.h"
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -39,6 +40,7 @@ struct Win32Platform : Platform {
     //   F9  look: sharp / smooth / scanlines     F11 or Alt+Enter  fullscreen
     //   F1  show these keys          F2  show the button mapping (again to hide)
     //   F4  put in the next disc of a multi-disc game
+    //   F10 screenshot: the game picture (320x240) as a PNG in screenshots\ next to the game
     // Save states: F5 save, F6 load, F3 choose the slot (1..9).
     enum Fit { Fit43, FitInteger, FitStretch, kFits };
     enum Look { LookSharp, LookSmooth, LookScanlines, kLooks };
@@ -100,7 +102,37 @@ struct Win32Platform : Platform {
                "Play (Start)\tEnter\tStart\n"
                "Stop (X)\tBackspace\tBack\n"
                "Next disc\tF4\n"
+               "Screenshot\tF10\n"
                "Other keys\tF1";
+    }
+    // F10: the current game picture, as the game drew it (no message panel, no
+    // scaling), saved as screenshots\<game>_<date>_<time>.png beside the .exe.
+    void screenshot() {
+        if (last.empty()) { say("Screenshot: no picture yet"); return; }
+        wchar_t buf[MAX_PATH];
+        const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        std::wstring exe(buf, n), dir = L".", name = L"game";
+        const size_t k = exe.find_last_of(L"\\/");
+        if (k != std::wstring::npos) { dir = exe.substr(0, k); name = exe.substr(k + 1); }
+        const size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos) name = name.substr(0, dot);
+        const std::wstring folder = dir + L"\\screenshots";
+        CreateDirectoryW(folder.c_str(), nullptr);
+        SYSTEMTIME t; GetLocalTime(&t);
+        wchar_t stamp[64];
+        swprintf(stamp, 64, L"_%04u-%02u-%02u_%02u-%02u-%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        std::wstring file = folder + L"\\" + name + stamp + L".png";
+        for (int i = 2; GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES && i < 100; ++i)   // two in one second
+            file = folder + L"\\" + name + stamp + L"_" + std::to_wstring(i) + L".png";
+        FILE* f = _wfopen(file.c_str(), L"wb");
+        const bool ok = f && tdort::png_write_file(f, last.data(), fw, fh);
+        if (f) std::fclose(f);
+        const std::wstring shown = file.substr(dir.size() + 1);
+        const int len = WideCharToMultiByte(CP_UTF8, 0, shown.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string u8(size_t(std::max(1, len)), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, shown.c_str(), -1, &u8[0], len, nullptr, nullptr);
+        u8.resize(std::strlen(u8.c_str()));
+        say(ok ? "Screenshot saved  \xC2\xB7  " + u8 : "Screenshot could not be saved (" + u8 + ")", 2500);
     }
     void toggle_controls() {
         if (controls_shown && !osd.empty()) { osd.clear(); controls_shown = false; redraw(); return; }
@@ -153,7 +185,7 @@ struct Win32Platform : Platform {
         switch (vk) {
         case VK_F1:
             say("F2\tButton mapping\nF5\tSave state (slot " + std::to_string(state_slot) + ")\nF6\tLoad state\nF3\tChange save slot\n"
-                "F4\tNext disc\nF7\tWindow size\nF8\tPicture shape\nF9\tLook\nF11\tFullscreen", 6000);
+                "F4\tNext disc\nF7\tWindow size\nF8\tPicture shape\nF9\tLook\nF10\tScreenshot\nF11\tFullscreen", 6000);
             return true;
         case VK_F2:
             toggle_controls();
@@ -203,7 +235,10 @@ struct Win32Platform : Platform {
                                         self->say(self->fullscreen ? "Fullscreen (F11 or Alt+Enter to leave)" : "Windowed"); }
                 return 0;
             }
-            if (self && w == VK_F10) return 0;                    // no menu-bar mode
+            if (self && w == VK_F10) {                            // F10: screenshot (and no menu-bar mode)
+                if (!(l & (1 << 30))) self->screenshot();
+                return 0;
+            }
             break;
         case WM_SETCURSOR:
             if (self && self->fullscreen && LOWORD(l) == HTCLIENT) { SetCursor(nullptr); return TRUE; }

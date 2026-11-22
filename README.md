@@ -333,6 +333,7 @@ For testing without a window: `TDORT_STATE_SAVE=<frame>:<slot>` and `TDORT_STATE
 | F1 | Shows the keys (display and save states) on screen |
 | F2 | Shows the button mapping (keyboard and controller); F2 again hides it |
 | F4 | Puts the next disc of a multi-disc game in the drive |
+| F10 | Screenshot: saves the game picture (320x240, as the game drew it) as a PNG in a `screenshots` folder next to the game's .exe, named after the game with the date and time |
 | F7 | Window size: 2x, 3x, 4x, 5x, 6x (640x480 up to 1920x1440; limited to what fits the screen) |
 | F8 | Picture shape: **4:3** (black bars), **Pixel perfect** (4:3 at a whole-number size, so every pixel is the same size), **Stretch** to the window |
 | F9 | Look: **Sharp** pixels, **Smooth** (filtered), **Scanlines** (CRT-style dark lines; best at 3x or more) |
