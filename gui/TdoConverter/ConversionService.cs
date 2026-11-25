@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -8,7 +10,11 @@ public enum Stage { Open, Extract, Analyze, Emit, Configure, Build, Done }
 
 public sealed record ConversionRequest(
     string DiscPath, string OutputDir, string? GameName, string? HintsPath,
-    string? LaunchMe, bool Build, bool ScanPrologues, bool Release);
+    string? LaunchMe, bool Build, bool ScanPrologues, bool Release)
+{
+    /// Discs 2, 3, ... of a multi-disc game (unpacked to data_disc2, ...).
+    public IReadOnlyList<string> ExtraDiscs { get; init; } = Array.Empty<string>();
+}
 
 /// <summary>Runs the native pipeline on a background thread. Everything is local.</summary>
 public sealed class ConversionService
@@ -27,6 +33,23 @@ public sealed class ConversionService
     public Task<int> ConvertAsync(ConversionRequest r) => Task.Run(() =>
     {
         NativeMethods.LogCallback log = OnLog;
+        // As the command line does: other discs first (seconds; the build takes
+        // minutes), and disc folders left from an earlier conversion removed.
+        for (int k = r.ExtraDiscs.Count + 2; k < 16; ++k)
+        {
+            string stale = Path.Combine(r.OutputDir, "data_disc" + k);
+            if (Directory.Exists(stale))
+            {
+                try { Directory.Delete(stale, true); Log?.Invoke(0, $"Removed {stale} (from an earlier conversion)"); } catch { }
+            }
+        }
+        for (int k = 0; k < r.ExtraDiscs.Count; ++k)
+        {
+            Log?.Invoke(0, $"Disc {k + 2}: {r.ExtraDiscs[k]}");
+            IntPtr src = NativeMethods.Utf8(r.ExtraDiscs[k]), dst = NativeMethods.Utf8(Path.Combine(r.OutputDir, "data_disc" + (k + 2)));
+            try { int rc = NativeMethods.tdo_extract_disc(src, dst, log, IntPtr.Zero); if (rc != 0) return rc; }
+            finally { NativeMethods.Free(src); NativeMethods.Free(dst); }
+        }
         NativeMethods.ProgressCallback prog = (s, f, _) => Progress?.Invoke((Stage)s, f);
         var o = new NativeMethods.ConvertOptions
         {

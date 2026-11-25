@@ -27,6 +27,8 @@ struct Platform {
     // Save states: a key asked for one (1 = save, 2 = load) into slot 1..9.
     virtual int      take_state_request(int& /*slot*/) { return 0; }
     virtual void     notify(const std::string& /*message*/) {}   // a short message over the picture
+    // Internal resolution the player chose (1..4, a hotkey); 0 = no choice.
+    virtual int      render_scale() { return 0; }
 };
 
 std::unique_ptr<Platform> make_platform(bool headless);

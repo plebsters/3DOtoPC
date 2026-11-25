@@ -1,6 +1,7 @@
 // hle_kernel.cpp - Portfolio kernel replacement: items, memory, lists, signals,
 // messages, IO dispatch, and the KernelBase vector table.
 #include "hle_os.h"
+#include "tdort/gfx.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -1190,8 +1191,22 @@ void Portfolio::install_kernel_swis() {
             std::vector<uint32_t> hit;
             for (auto& [a, sz] : allocs_)
                 if (a < p + size && a + sz > p) hit.push_back(a);
+            // A frame buffer given away this way belongs to the new owner: the
+            // screen group that allocated it no longer frees it when it goes.
+            // Samurai Shodown's character select makes the screens, gives
+            // their buffers to the fight program and exits; deleting its
+            // screen group freed them, the fight program's next big
+            // allocation landed on top of the screens it was drawing to, and
+            // its sprite tables filled with pixels (dark, broken fighters).
+            // TDORT_OLD_CONTROLMEM_SCREENS=1: the screen group still frees them.
+            static const bool old_scr = std::getenv("TDORT_OLD_CONTROLMEM_SCREENS") != nullptr;
             for (uint32_t a : hit) {
-                if (owner) alloc_owner_[a] = owner;
+                if (owner) {
+                    if (!old_scr && alloc_owner_[a] != owner)
+                        for (HleItem& it : items_)
+                            if (it.alive && it.kind == ItemKind::Bitmap && it.owns_buffer && it.buffer == a) it.owns_buffer = false;
+                    alloc_owner_[a] = owner;
+                }
                 else if (a >= p && a + allocs_[a] <= p + size) free_mem(a);   // whole blocks back to the system
             }
             rt.log("ControlMem: %s %08X+%X (%zu block(s))", owner ? "gave" : "returned", p, size, hit.size());
@@ -1716,6 +1731,7 @@ void Portfolio::sport_io(HleItem& ior, uint32_t info) {
             store_be32(d, (mask & m) | (load_be32(d) & ~m));
         }
         rt.mem.invalidate(dst, dlen);
+        rt.gfx->note_write(dst, dlen);
         complete_io(ior, 0, dlen);
         return;
     }
@@ -1732,6 +1748,7 @@ void Portfolio::sport_io(HleItem& ior, uint32_t info) {
         store_be32(d, mask == 0xFFFFFFFFu ? s : ((s & mask) | (load_be32(d) & ~mask)));
     }
     rt.mem.invalidate(dst, n);
+    rt.gfx->note_write(dst, n);
     // The SPORT bus moves VRAM during vertical blank, so an asynchronous
     // request finishes at the next one. Games rely on the wait: Slam 'n Jam's
     // draw loop blocks on it each frame, which is when its low-priority input

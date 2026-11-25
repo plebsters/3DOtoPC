@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 
 namespace tdort {
 
@@ -39,6 +40,18 @@ static inline uint32_t rgb555_to_xrgb(uint32_t p) {
     return (r << 19 | (r >> 2) << 16) | (g << 11 | (g >> 2) << 8) | (b << 3 | b >> 2);
 }
 
+// One 16-bit frame buffer pixel of screen line y to XRGB, through the VDL
+// colour table when there is one.
+static inline uint32_t display_pixel(uint32_t pix, int y, const std::vector<uint32_t>& clut) {
+    if (clut.size() >= size_t(Gfx::kHeight) * 32) {
+        if (pix & 0x8000) return rgb555_to_xrgb(pix & 0x7FFF);   // bit 15: the colour table is bypassed
+        if ((pix & 0x7FFF) == 0) return 0;                        // a 0 pixel shows the background colour (black), not entry 0
+        const uint32_t* t = &clut[size_t(y) * 32];
+        return (t[(pix >> 10) & 31] & 0xFF0000) | (t[(pix >> 5) & 31] & 0xFF00) | (t[pix & 31] & 0xFF);
+    }
+    return rgb555_to_xrgb(pix & 0x7FFF);
+}
+
 const uint32_t* Gfx::scan_out() {
     if (display_addr_ == 0 || display_addr_ >= kRamEnd) return frame_.data();
     const uint8_t* src = &mem_.ram[display_addr_];
@@ -57,19 +70,196 @@ const uint32_t* Gfx::scan_out() {
                 const uint8_t* p = src + (y * kWidth + x) * 2;
                 pix = (uint32_t(p[0]) << 8) | p[1];
             }
-            if (clut_.size() >= size_t(kHeight) * 32 && (pix & 0x8000)) {
-                frame_[y * kWidth + x] = rgb555_to_xrgb(pix & 0x7FFF);   // bit 15: the colour table is bypassed
-            } else if (clut_.size() >= size_t(kHeight) * 32 && (pix & 0x7FFF) == 0) {
-                frame_[y * kWidth + x] = 0;   // a 0 pixel shows the background colour (black), not entry 0
-            } else if (clut_.size() >= size_t(kHeight) * 32) {
-                const uint32_t* t = &clut_[size_t(y) * 32];
-                frame_[y * kWidth + x] = (t[(pix >> 10) & 31] & 0xFF0000) | (t[(pix >> 5) & 31] & 0xFF00) | (t[pix & 31] & 0xFF);
-            } else {
-                frame_[y * kWidth + x] = rgb555_to_xrgb(pix & 0x7FFF);
+            frame_[y * kWidth + x] = display_pixel(pix, y, clut_);
+        }
+    }
+    if (scale_ > 1) {
+        const int s = scale_, W = kWidth * s;
+        hi_frame_.resize(size_t(W) * kHeight * s);
+        const int k = lrform ? shadow_for(display_addr_, kWidth, lines, false) : -1;
+        if (k >= 0) {
+            Shadow& sh = shadows_[size_t(k)];
+            sync(sh);
+            const int hl = std::min(lines, sh.h) * s;
+            const bool has_clut = clut_.size() >= size_t(kHeight) * 32;
+            if (!has_clut && rgb_lut_.empty()) {
+                rgb_lut_.resize(65536);
+                for (uint32_t v = 0; v < 65536; ++v) rgb_lut_[v] = rgb555_to_xrgb(v & 0x7FFF);
+            }
+            for (int Y = 0; Y < hl; ++Y) {
+                const uint16_t* row = &sh.hi[size_t(Y) * W];
+                uint32_t* out = &hi_frame_[size_t(Y) * W];
+                if (!has_clut) for (int X = 0; X < W; ++X) out[X] = rgb_lut_[row[X]];
+                else for (int X = 0; X < W; ++X) out[X] = display_pixel(row[X], Y / s, clut_);
+            }
+            std::fill(hi_frame_.begin() + long(hl) * W, hi_frame_.end(), 0u);
+        } else {                          // nothing drawn by cels: the 1x picture, enlarged
+            for (int Y = 0; Y < kHeight * s; ++Y) {
+                const uint32_t* in = &frame_[size_t(Y / s) * kWidth];
+                uint32_t* out = &hi_frame_[size_t(Y) * W];
+                for (int X = 0; X < W; ++X) out[X] = in[X / s];
             }
         }
     }
     return frame_.data();
+}
+
+// ---- hi-res shadows -----------------------------------------------------------
+
+void Gfx::set_scale(int s) {
+    s = std::clamp(s, 1, 4);
+    if (s == scale_) return;
+    scale_ = s;
+    drop_shadows();
+    hi_frame_.clear();
+}
+
+int Gfx::shadow_for(uint32_t buffer, int w, int h, bool create) {
+    for (size_t i = 0; i < shadows_.size(); ++i) {
+        Shadow& sh = shadows_[i];
+        if (sh.buffer == buffer && sh.w == w && sh.h >= h) { sh.used = ++use_clock_; return int(i); }
+    }
+    if (!create) return -1;
+    // Screens only: small bitmaps are textures drawn into, gaining nothing.
+    if (scale_ < 2 || !lrform || w < 256 || h < 200 || w > 1280 || h > 960) return -1;
+    const uint32_t bytes = uint32_t(w) * uint32_t((h + 1) / 2) * 4;
+    if (buffer == 0 || buffer >= kRamEnd || bytes > kRamEnd - buffer) return -1;
+    // A bitmap overlapping a shadowed one replaces it (a game re-using memory).
+    for (size_t i = 0; i < shadows_.size();) {
+        const Shadow& o = shadows_[i];
+        if (buffer < o.buffer + o.ref.size() && o.buffer < buffer + bytes) shadows_.erase(shadows_.begin() + long(i));
+        else ++i;
+    }
+    constexpr size_t kMaxShadows = 6;
+    if (shadows_.size() >= kMaxShadows) {
+        size_t lru = 0;
+        for (size_t i = 1; i < shadows_.size(); ++i) if (shadows_[i].used < shadows_[lru].used) lru = i;
+        shadows_.erase(shadows_.begin() + long(lru));
+    }
+    Shadow sh;
+    sh.buffer = buffer; sh.w = w; sh.h = h; sh.used = ++use_clock_;
+    sh.hi.assign(size_t(w) * scale_ * size_t(h) * scale_, 0);
+    sh.ref.assign(bytes, 0);
+    // Every pixel differs from the reference: the first sync copies them all.
+    for (uint32_t i = 0; i < bytes; ++i) sh.ref[i] = uint8_t(~mem_.ram[buffer + i]);
+    shadows_.push_back(std::move(sh));
+    return int(shadows_.size() - 1);
+}
+
+// Pixels the cel engine did not write since it last looked: copy them from
+// the bitmap into the shadow, each as a scale x scale block. When much of the
+// bitmap changed (the game cleared or redrew the screen) the whole shadow is
+// taken from it, so edges drawn in the shadow alone do not linger on pixels
+// the game happened to rewrite with the same value.
+void Gfx::sync(Shadow& sh) {
+    const uint8_t* m = &mem_.ram[sh.buffer];
+    const size_t n = sh.ref.size();
+    if (std::memcmp(m, sh.ref.data(), n) == 0) return;
+    const size_t words = n / 4;
+    size_t changed = 0;
+    for (size_t k = 0; k < words; ++k) {
+        uint32_t p, q;
+        std::memcpy(&p, m + k * 4, 4); std::memcpy(&q, &sh.ref[k * 4], 4);
+        changed += p != q;
+    }
+    const bool full = changed * 4 > words;
+    const int s = scale_, W = sh.w * s;
+    auto block = [&](int x, int y, uint16_t v) {
+        if (y >= sh.h) return;
+        for (int dy = 0; dy < s; ++dy) {
+            uint16_t* d = &sh.hi[size_t(y * s + dy) * W + size_t(x) * s];
+            for (int dx = 0; dx < s; ++dx) d[dx] = v;
+        }
+    };
+    for (size_t k = 0; k < words; ++k) {
+        const uint8_t* a = m + k * 4;
+        const uint8_t* r = &sh.ref[k * 4];
+        if (!full && std::memcmp(a, r, 4) == 0) continue;
+        const int x = int(k % size_t(sh.w)), y = int(k / size_t(sh.w)) * 2;
+        if (full || a[0] != r[0] || a[1] != r[1]) block(x, y, uint16_t((a[0] << 8) | a[1]));
+        if (full || a[2] != r[2] || a[3] != r[3]) block(x, y + 1, uint16_t((a[2] << 8) | a[3]));
+    }
+    std::memcpy(sh.ref.data(), m, n);
+}
+
+void Gfx::note_write(uint32_t addr, uint32_t len) {
+    for (Shadow& sh : shadows_) {
+        const uint64_t a = std::max<uint64_t>(addr, sh.buffer);
+        const uint64_t b = std::min<uint64_t>(uint64_t(addr) + len, uint64_t(sh.buffer) + sh.ref.size());
+        for (uint64_t i = a; i < b; ++i) sh.ref[i - sh.buffer] = uint8_t(~mem_.ram[i]);
+    }
+}
+
+// The same quad as fill_quad, on the shadow's finer grid.
+void Gfx::fill_quad_hi(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]) {
+    Shadow& sh = shadows_[size_t(cur_)];
+    const int s = scale_, W = sh.w * s, H = sh.h * s;
+    const int cx0 = std::max(0, t.clip_x * s), cy0 = std::max(0, t.clip_y * s);
+    const int cx1 = std::min(W, (t.clip_x + t.clip_w) * s), cy1 = std::min(H, (t.clip_y + t.clip_h) * s);
+    if (cx0 >= cx1 || cy0 >= cy1) return;
+    int64_t X[4], Y[4];
+    for (int i = 0; i < 4; ++i) { X[i] = int64_t(x[i]) * s; Y[i] = int64_t(y[i]) * s; }
+    const uint32_t ctl = px.pmode ? (r_.pixc >> 16) & 0xFFFF : r_.pixc & 0xFFFF;
+    const bool needs_fb = (ctl & 0x8000) || ((ctl >> 6) & 3) == 2;
+    const uint16_t flat = needs_fb ? 0 : process(px, 0);
+    uint16_t* hi = sh.hi.data();
+    auto put = [&](int xx, int yy) {
+        uint16_t& d = hi[size_t(yy) * W + size_t(xx)];
+        d = needs_fb ? process(px, d) : flat;
+    };
+    if (Y[0] == Y[1] && Y[2] == Y[3] && X[0] == X[3] && X[1] == X[2]) {
+        const int64_t xa = std::min(X[0], X[1]), xb = std::max(X[0], X[1]);
+        const int64_t ya = std::min(Y[0], Y[3]), yb = std::max(Y[0], Y[3]);
+        const int px0 = int(std::clamp<int64_t>((xa + 0x7FFF) >> 16, cx0, cx1)), px1 = int(std::clamp<int64_t>((xb + 0x7FFF) >> 16, cx0, cx1));
+        const int py0 = int(std::clamp<int64_t>((ya + 0x7FFF) >> 16, cy0, cy1)), py1 = int(std::clamp<int64_t>((yb + 0x7FFF) >> 16, cy0, cy1));
+        for (int yy = py0; yy < py1; ++yy)
+            for (int xx = px0; xx < px1; ++xx) put(xx, yy);
+        return;
+    }
+    const int64_t area = (X[1] - X[0]) * (Y[2] - Y[0]) - (Y[1] - Y[0]) * (X[2] - X[0]);
+    const int sign = area > 0 ? 1 : -1;
+    const int64_t minx = std::min({X[0], X[1], X[2], X[3]}), maxx = std::max({X[0], X[1], X[2], X[3]});
+    const int64_t miny = std::min({Y[0], Y[1], Y[2], Y[3]}), maxy = std::max({Y[0], Y[1], Y[2], Y[3]});
+    const int bx0 = int(std::clamp<int64_t>(minx >> 16, cx0, cx1)), bx1 = int(std::clamp<int64_t>((maxx >> 16) + 1, cx0, cx1));
+    const int by0 = int(std::clamp<int64_t>(miny >> 16, cy0, cy1)), by1 = int(std::clamp<int64_t>((maxy >> 16) + 1, cy0, cy1));
+    // Edge functions, stepped per pixel instead of recomputed: e(x, y) >= 0
+    // on the inside of every edge (multiplied by the winding's sign).
+    int64_t ex[4], ey[4], row_e[4], dx_e[4], dy_e[4];
+    const int64_t sx0 = (int64_t(bx0) << 16) + 0x8000, cy0f = (int64_t(by0) << 16) + 0x8000;
+    for (int e = 0; e < 4; ++e) {
+        const int f = (e + 1) & 3;
+        ex[e] = X[f] - X[e]; ey[e] = Y[f] - Y[e];
+        row_e[e] = (ex[e] * (cy0f - Y[e]) - ey[e] * (sx0 - X[e])) * sign;
+        dx_e[e] = -ey[e] * 65536 * sign;
+        dy_e[e] = ex[e] * 65536 * sign;
+    }
+    const int bw = bx1 - bx0;
+    for (int yy = by0; yy < by1; ++yy) {
+        if (bw <= 6) {                    // narrow: test each pixel
+            int64_t e0 = row_e[0], e1 = row_e[1], e2 = row_e[2], e3 = row_e[3];
+            for (int xx = bx0; xx < bx1; ++xx) {
+                if ((e0 | e1 | e2 | e3) >= 0) put(xx, yy);
+                e0 += dx_e[0]; e1 += dx_e[1]; e2 += dx_e[2]; e3 += dx_e[3];
+            }
+        } else {                          // wide: the run where all four edges agree
+            int64_t lo = 0, hi_k = bw - 1;
+            for (int e = 0; e < 4 && lo <= hi_k; ++e) {
+                const int64_t r = row_e[e], d = dx_e[e];
+                if (d > 0) {              // r + k*d >= 0  <=>  k >= ceil(-r / d)
+                    const int64_t k = r >= 0 ? -(r / d) : (-r + d - 1) / d;
+                    lo = std::max(lo, k);
+                } else if (d < 0) {       // k <= floor(r / -d)
+                    const int64_t D = -d;
+                    const int64_t k = r >= 0 ? r / D : -((-r + D - 1) / D);
+                    hi_k = std::min(hi_k, k);
+                } else if (r < 0) {
+                    hi_k = -1;
+                }
+            }
+            for (int64_t k = lo; k <= hi_k; ++k) put(bx0 + int(k), yy);
+        }
+        for (int e = 0; e < 4; ++e) row_e[e] += dy_e[e];
+    }
 }
 
 // ---- framebuffer access (LR form: line pairs share 32-bit words) -----------
@@ -84,6 +274,11 @@ void Gfx::fb_write(const CelTarget& t, int x, int y, uint16_t v) {
     if (a >= kRamEnd - 1) return;   // also catches addresses that wrap past 4 GB
     mem_.ram[a] = uint8_t(v >> 8);
     mem_.ram[a + 1] = uint8_t(v);
+    if (cur_ >= 0) {
+        Shadow& sh = shadows_[size_t(cur_)];
+        const uint32_t o = a - sh.buffer;
+        if (a >= sh.buffer && o + 1 < sh.ref.size()) { sh.ref[o] = uint8_t(v >> 8); sh.ref[o + 1] = uint8_t(v); }
+    }
 }
 
 // ---- pixel decoder ----------------------------------------------------------
@@ -218,6 +413,7 @@ void Gfx::fill_quad(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], 
     if (area == 0) return;
     if (area > 0 && !(r_.flags & kAcw)) return;
     if (area < 0 && !(r_.flags & kAccw)) return;
+    if (cur_ >= 0) fill_quad_hi(t, px, x, y);
 
     // Axis-aligned fast path (the common unrotated sprite)
     if (y[0] == y[1] && y[2] == y[3] && x[0] == x[3] && x[1] == x[2]) {
@@ -328,6 +524,8 @@ void Gfx::draw_one(const CelTarget& t, uint32_t src) {
 
 int Gfx::draw_cels(const CelTarget& t, uint32_t ccb) {
     int drawn = 0;
+    cur_ = scale_ > 1 ? shadow_for(t.buffer, t.width, t.height, true) : -1;
+    if (cur_ >= 0) sync(shadows_[size_t(cur_)]);
     for (int guard = 0; ccb && ccb < kRamEnd - 23 && guard < 4096; ++guard) {
         // A CCB is read sequentially: optional groups are present only when
         // their load flag is set; values not loaded keep the previous ones.
@@ -377,6 +575,7 @@ int Gfx::draw_cels(const CelTarget& t, uint32_t ccb) {
         ccb = nxt;
     }
     cels_drawn += uint64_t(drawn);
+    cur_ = -1;
     return drawn;
 }
 

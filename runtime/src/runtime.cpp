@@ -523,13 +523,18 @@ int Runtime::run(Platform* platform) {
                 if (FILE* fp = std::fopen(name, "wb")) { std::fwrite(&mem.ram[a], 1, l, fp); std::fclose(fp); }
             }
         }
+        // Internal resolution (1..4): TDORT_SCALE if set, else the player's
+        // choice (F12 on Windows), else as on the console.
+        static const int env_scale = [] { const char* e = std::getenv("TDORT_SCALE"); return e ? std::atoi(e) : 0; }();
+        const int want_scale = platform->render_scale();
+        gfx->set_scale(env_scale > 0 ? env_scale : want_scale > 0 ? want_scale : 1);
         const uint32_t* pixels = gfx->scan_out();
         if (frames_ % 10 == 0) {     // when the picture last changed, for the diagnosis report
             uint64_t h = 1469598103934665603ull;
             for (int i = 0; i < Gfx::kWidth * Gfx::kHeight; i += 7) h = (h ^ pixels[i]) * 1099511628211ull;
             if (h != screen_hash_) { screen_hash_ = h; screen_change_frame_ = frames_; }
         }
-        platform->present(pixels, Gfx::kWidth, Gfx::kHeight);
+        platform->present(gfx->out_frame(), gfx->out_width(), gfx->out_height());
         audio->mix(mixbuf.data(), audio_frames);
         platform->queue_audio(mixbuf.data(), audio_frames);
         platform->wait_frame(cfg.refresh_hz);

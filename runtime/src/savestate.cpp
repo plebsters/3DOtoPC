@@ -98,6 +98,7 @@ struct StateIO {
     }
     static void io(StateAr& a, Gfx& g) {
         a(g.r_); a(g.display_lines_); a(g.display_addr_); a(g.clut_); a(g.lrform); a(g.cels_drawn); a(g.pixels_written);
+        if (!a.saving) g.drop_shadows();   // rebuilt from the loaded bitmaps
     }
     static void io(StateAr& a, Portfolio& p) {
         // Files and streams open now are closed first: loading replaces them.

@@ -63,6 +63,19 @@ What Setup does:
 The GitHub build makes the same installer (artifact **3DO2PC-windows-setup**), and a version
 tag attaches it to the release next to the zip.
 
+## The 3DO to PC window
+
+- **Browse…** for a disc image (.iso, .bin or .cue). The output folder fills in as
+  `games\<title>\` in the app's folder (title from the file name, tags like "(1994)(EU-US)[!]"
+  left out), which is where the launcher looks. A folder you pick yourself is kept.
+- A multi-disc game is found by name, as below: choosing any disc converts all of them
+  together from disc 1.
+- **Batch…** picks several disc images at once and converts them one after another, with
+  the options shown, into `games\<title>\`. Discs of one game are converted together; a game
+  whose folder already has an .exe is skipped (delete the folder to convert it again). The
+  button becomes **Stop after this game** while the batch runs. At the end the log lists
+  what converted, failed or was skipped, and is saved as `games\batch-log.txt`.
+
 ## Multi-disc games
 
 Drop disc 1 on **Convert-3DO.bat**: discs named like `Game (Disc 1 of 2).cue` find their
@@ -334,17 +347,27 @@ For testing without a window: `TDORT_STATE_SAVE=<frame>:<slot>` and `TDORT_STATE
 | F1 | Shows the keys (display and save states) on screen |
 | F2 | Shows the button mapping (keyboard and controller); F2 again hides it |
 | F4 | Puts the next disc of a multi-disc game in the drive |
-| F10 | Screenshot: saves the game picture (320x240, as the game drew it) as a PNG in a `screenshots` folder next to the game's .exe, named after the game with the date and time |
+| F10 | Screenshot: saves the game picture (320x240 times the F12 detail level) as a PNG in a `screenshots` folder next to the game's .exe, named after the game with the date and time |
 | F7 | Window size: 2x, 3x, 4x, 5x, 6x (640x480 up to 1920x1440; limited to what fits the screen) |
 | F8 | Picture shape: **4:3** (black bars), **Pixel perfect** (4:3 at a whole-number size, so every pixel is the same size), **Stretch** to the window |
 | F9 | Look: **Sharp** pixels, **Smooth** (filtered), **Scanlines** (CRT-style dark lines; best at 3x or more) |
 | F11 or Alt+Enter | Fullscreen on and off (a borderless window over the whole monitor, so switching is instant) |
+| F12 | Detail: draws the game at 1x, 2x, 3x or 4x the 3DO's resolution (320x240 up to 1280x960). 3D games, and sprites that turn or shrink, get smooth edges and the full detail of far-away textures. 1x is the picture exactly as on the console. Default 2x |
 
 A short message in a rounded panel at the top left confirms each change (F1 lists every key). The settings are kept in
 `%APPDATA%\3DO to PC\display.cfg` and apply to every converted game; delete the file to go
-back to the defaults (3x window, 4:3, sharp). You can also drag the window to any size: the
-picture keeps its shape. This only changes how the 320x240 picture is shown; games still
-draw at the 3DO's resolution.
+back to the defaults (3x window, 4:3, sharp, 2x detail). You can also drag the window to any size: the
+picture keeps its shape.
+
+**How the detail setting works.** The game still draws into its own 320x240 screens exactly
+as on the console, so it behaves the same at every level. Each cel is also drawn a second
+time into a finer copy of the screen, and that copy is what you see. Pixels the game writes
+itself (movies, screen clears, some text) are copied into the finer picture as they are, so
+full-motion video and hand-drawn screens look the same as at 1x. The textures themselves are
+not changed: a wall close to the camera still shows its original texels. Higher levels cost
+CPU time: in a Crash 'n Burn race the whole game took about 60% more at 2x and about twice as
+much at 4x as at 1x. Go back to 2x or 1x if a game slows down. With **Sharp** look and a window size that is not a multiple of the detail level, pixel
+edges can look uneven; **Smooth** (F9) or a matching size (F7) avoids that.
 
 ## Diagnosis report
 
@@ -418,6 +441,8 @@ Environment variables:
 | `TDORT_OLD_ITEM_NUMBERS=1` | game items are numbered right after the runtime's own (they start at 64 otherwise) |
 | `TDORT_OLD_SEMAPHORE=1` | `UnlockSemaphore` frees the semaphore and lets the waiters retry instead of giving it to the first waiter |
 | `TDORT_OLD_HELD_BUTTONS=1` | a new event listener's update frames include buttons that were already held when it started |
+| `TDORT_OLD_CONTROLMEM_SCREENS=1` | a screen group still frees a frame buffer its task gave to another task with `ControlMem` |
+| `TDORT_SCALE=1..4` | internal resolution, overriding the F12 setting (headless snapshots are taken at that size too) |
 | `TDORT_TRACE_FROM=<frame>` | turns on `--trace` logging at that frame (debugging a long session) |
 | `TDORT_SMALL_ALLOC_FLOOR_KB=0` | no 32 KB floor for small allocations (the size in KB; 0 turns it off) |
 | `TDORT_OLD_SCREEN_DELETE=1` | deleting a screen group keeps its screens, bitmaps and frame buffers |
@@ -624,6 +649,16 @@ Fixes found by running games (each a difference from the real OS):
   broker only reports changes, so buttons already held when a listener starts are now
   left out of its updates until they are let go (`TDORT_OLD_HELD_BUTTONS=1`: report
   them). Pausing and unpausing now work, and the intro, story and game play run.
+* Samurai Shodown's fighters were drawn wrong (dark, broken or missing sprites). The
+  character select program makes the two screens, gives their frame buffers to the fight
+  program with `ControlMem` and exits. The runtime then deleted its screen group and, with
+  it, freed the buffers it had given away; the fight program's next big allocation landed
+  on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
+  away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* Higher internal resolution (F12, `TDORT_SCALE`): every cel drawn into a screen-sized
+  bitmap is also drawn into a 2x-4x copy of it, with the same pixel processor, so 3D games
+  (Crash 'n Burn's tracks, for example) show smooth polygon edges and far textures in full.
+  The game's own bitmaps are untouched: regression runs at 2x give the same results as at 1x.
 * Theme Park's world map was covered in garbage (rows of orange and black stripes). The
   game loads its sprite data, then adds the data's address to each offset in the sprite
   table, but only to offsets smaller than that address. On the console the OS fills low
@@ -788,6 +823,6 @@ against the local game builds before release.
 2. Cinepak / streaming-movie library, DSP effects, more input devices.
 3. Recompiler optimizations: direct block chaining, register caching, jump-table recovery.
 4. Per-game patch files (widescreen, 60 fps, input remaps) and an Xbox UWP platform layer.
-5. Picture: draw at 2x/4x internal resolution (sharp 3D games), a Direct3D 11 presenter with
+5. Picture: (done: 2x-4x internal resolution, F12) texture filtering for the finer picture, a Direct3D 11 presenter with
    scaling filters (integer, xBR, CRT, FSR 1), which also lets driver frame generation
    (NVIDIA Smooth Motion, AMD AFMF) work.

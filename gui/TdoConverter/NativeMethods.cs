@@ -34,6 +34,10 @@ internal static class NativeMethods
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     private static extern int tdo_detect_toolchain(byte[] buf, int len);
 
+    // Another disc of a multi-disc game: its files go to destDir (data_disc2, ...).
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int tdo_extract_disc(IntPtr discPath, IntPtr destDir, LogCallback log, IntPtr user);
+
     public static string Version() => Marshal.PtrToStringUTF8(tdo_version()) ?? "?";
 
     public static (bool found, string description) DetectToolchain()

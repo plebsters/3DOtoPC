@@ -26,6 +26,9 @@ std::unique_ptr<Platform> make_null_platform();
 
 namespace {
 
+// F12 detail level for a first run (no display.cfg line yet).
+constexpr int kDefaultDetail = 2;
+
 struct Win32Platform : Platform {
     HWND hwnd = nullptr;
     bool quit = false;
@@ -40,11 +43,13 @@ struct Win32Platform : Platform {
     //   F9  look: sharp / smooth / scanlines     F11 or Alt+Enter  fullscreen
     //   F1  show these keys          F2  show the button mapping (again to hide)
     //   F4  put in the next disc of a multi-disc game
-    //   F10 screenshot: the game picture (320x240) as a PNG in screenshots\ next to the game
+    //   F10 screenshot: the game picture (320x240, or finer with F12) as a PNG in screenshots\ next to the game
+    //   F12 detail: draw the game at 1x..4x its resolution (smoother 3D and scaled sprites)
     // Save states: F5 save, F6 load, F3 choose the slot (1..9).
     enum Fit { Fit43, FitInteger, FitStretch, kFits };
     enum Look { LookSharp, LookSmooth, LookScanlines, kLooks };
     int scale = 3, fit = Fit43, look = LookSharp;
+    int detail = kDefaultDetail;          // internal resolution, 1..4
     bool fullscreen = false;
     int state_slot = 1, state_req = 0;    // save states: slot, and 1 = save / 2 = load asked for
     WINDOWPLACEMENT saved_place{sizeof(WINDOWPLACEMENT)};
@@ -75,13 +80,14 @@ struct Win32Platform : Platform {
             else if (std::sscanf(line, "fit=%d", &v) == 1) fit = std::clamp(v, 0, int(kFits) - 1);
             else if (std::sscanf(line, "look=%d", &v) == 1) look = std::clamp(v, 0, int(kLooks) - 1);
             else if (std::sscanf(line, "fullscreen=%d", &v) == 1) fullscreen = v != 0;
+            else if (std::sscanf(line, "detail=%d", &v) == 1) detail = std::clamp(v, 1, 4);
         }
         std::fclose(f);
     }
     void save_settings() {
         FILE* f = _wfopen(settings_path().c_str(), L"w");
         if (!f) return;
-        std::fprintf(f, "scale=%d\nfit=%d\nlook=%d\nfullscreen=%d\n", scale, fit, look, fullscreen ? 1 : 0);
+        std::fprintf(f, "scale=%d\nfit=%d\nlook=%d\nfullscreen=%d\ndetail=%d\n", scale, fit, look, fullscreen ? 1 : 0, detail);
         std::fclose(f);
     }
     void say(const std::string& text, int ms = 2000, int tab = 6) {
@@ -185,7 +191,7 @@ struct Win32Platform : Platform {
         switch (vk) {
         case VK_F1:
             say("F2\tButton mapping\nF5\tSave state (slot " + std::to_string(state_slot) + ")\nF6\tLoad state\nF3\tChange save slot\n"
-                "F4\tNext disc\nF7\tWindow size\nF8\tPicture shape\nF9\tLook\nF10\tScreenshot\nF11\tFullscreen", 6000);
+                "F4\tNext disc\nF7\tWindow size\nF8\tPicture shape\nF9\tLook\nF10\tScreenshot\nF11\tFullscreen\nF12\tDetail (resolution)", 6000);
             return true;
         case VK_F2:
             toggle_controls();
@@ -209,6 +215,11 @@ struct Win32Platform : Platform {
         case VK_F9:
             look = (look + 1) % kLooks; save_settings();
             say(std::string("Look  \xC2\xB7  ") + look_name(look));
+            return true;
+        case VK_F12:
+            detail = detail % 4 + 1; save_settings();
+            say("Detail  " + std::to_string(detail) + "\xC3\x97   (" + std::to_string(320 * detail) + " \xC3\x97 " + std::to_string(240 * detail) +
+                (detail == 1 ? ", as on the console)" : ")"));
             return true;
         case VK_F11:
             set_fullscreen(!fullscreen); save_settings();
@@ -384,6 +395,7 @@ struct Win32Platform : Platform {
             int prev = -1;
             for (int y = y0; y < y1; ++y) {
                 const int64_t fy = int64_t(y) * sh * 4 / bh;                 // quarter source lines
+                const int64_t fl = int64_t(y) * 240 * 4 / bh;                // quarter 3DO lines (the picture may be drawn finer)
                 const int sy = std::min(int(fy / 4), sh - 1);
                 uint32_t* d = &out[size_t(y) * bw];
                 if (sy == prev && y > y0) std::memcpy(d, d - bw, size_t(bw) * 4);   // same source line as above
@@ -391,7 +403,7 @@ struct Win32Platform : Platform {
                 prev = sy;
                 // Scanlines: the last quarter of each source line at half brightness
                 // (needs at least 2 screen lines per source line to show).
-                if (look == LookScanlines && bh >= sh * 2 && (fy & 3) == 3) {
+                if (look == LookScanlines && bh >= 480 && (fl & 3) == 3) {
                     for (int x = 0; x < bw; ++x) d[x] = (d[x] >> 1) & 0x7F7F7F;
                     prev = -1;                                           // this line is darkened: don't copy it
                 }
@@ -516,6 +528,7 @@ struct Win32Platform : Platform {
         const int r = state_req; state_req = 0; slot = state_slot; return r;
     }
     void notify(const std::string& message) override { say(message); }
+    int render_scale() override { return detail; }
 
     void present(const uint32_t* px, int w, int h) override {
         fw = w; fh = h; last.assign(px, px + size_t(w) * h);
