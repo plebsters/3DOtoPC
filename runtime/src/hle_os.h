@@ -115,6 +115,7 @@ public:
     HleItem* item(int32_t num);
     HleItem* find_item(uint32_t ctype, const std::string& name);
     int32_t  delete_item(int32_t num);
+    int32_t  game_delete_item(int32_t num);   // DeleteItem from the game: only the owner may
 
     // ---- game heap
     uint32_t alloc(uint32_t size, uint32_t flags);

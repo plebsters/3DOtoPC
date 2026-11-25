@@ -87,6 +87,10 @@ struct NullPlatform : Platform {
         return b;
     }
     void present(const uint32_t* px, int w, int h) override {
+        // Touch the picture's first and last pixel every frame, as the window
+        // does, so a bad picture pointer fails headless tests too.
+        static volatile uint32_t sink;
+        sink = px[0] ^ px[size_t(w) * h - 1];
         if (snaps.count(frame)) { std::string n = "snap_" + std::to_string(frame) + ".bmp"; write_bmp(n.c_str(), px, w, h); }
     }
     // TDORT_WAV=file.wav records the game's sound (for checking audio headless).

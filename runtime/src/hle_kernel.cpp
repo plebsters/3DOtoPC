@@ -173,9 +173,28 @@ HleItem* Portfolio::find_item(uint32_t ctype, const std::string& name) {
     return nullptr;
 }
 
+// DeleteItem as the game calls it: a task (or thread) may delete only items
+// it owns, and itself; anything else fails with a privilege error and the
+// item stays. Sailor Moon S's music thread "unloads" the fight's mixer, which
+// the main task made: on the console that fails, and the main task goes on
+// using the mixer (deleting it silenced the fight). TDORT_OLD_DELETE_ANY=1:
+// any task may delete any item, as before.
+int32_t Portfolio::game_delete_item(int32_t num) {
+    static const bool any = std::getenv("TDORT_OLD_DELETE_ANY") != nullptr;
+    HleItem* it = item(num);
+    if (!it) return kErrBadItem;
+    if (!any && !tasks_.empty() && it->owner_task && it->owner_task != cur().item && num != cur().item) {
+        if (rt.cfg.trace) rt.log("DeleteItem(%d): task %d does not own it (owner %d)", num, cur().item, it->owner_task);
+        return kErrBadPriv;
+    }
+    return delete_item(num);
+}
+
 int32_t Portfolio::delete_item(int32_t num) {
     HleItem* it = item(num);
     if (!it) return kErrBadItem;
+    static const bool log_items = std::getenv("TDORT_LOG_AUDIO_ITEMS") != nullptr;
+    if (log_items) rt.log("DeleteItem(%d) by task %d", num, cur().item);
     if (it->kind == ItemKind::Folio) return kErrNotSupported;
     if (it->kind == ItemKind::Task) {
         HleTask* t = task_by_item(num);
@@ -974,7 +993,7 @@ void Portfolio::install_kernel_swis() {
     });
     K(29, "callbacksuper", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });   // supervisor code: not available
     K(34, "CompleteIO", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });       // for device drivers
-    K(kDeleteItem, "DeleteItem", [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); });
+    K(kDeleteItem, "DeleteItem", [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); });
     auto find = [this](bool open) {
         return [this, open](Cpu*) {
             const uint32_t ctype = arg(0);

@@ -199,6 +199,7 @@ constexpr int32_t kErrBadItem = int32_t(0x81010101), kErrNoMem = int32_t(0x81010
                   // the file folio's "no such file" (MakeFErr(..., ER_Fs_NoFile)); games compare with it
                   kErrFsNoFile = int32_t(0xD556F101), kErrGrafBadClip = int32_t(0xD55B9115), kErrBadPtr = int32_t(0x81010104),
                   kErrNotSupported = int32_t(0x81010105), kErrBadCommand = int32_t(0x81010106),
-                  kErrNoSignals = int32_t(0x81010107), kErrEof = int32_t(0x81010108);
+                  kErrNoSignals = int32_t(0x81010107), kErrEof = int32_t(0x81010108),
+                  kErrBadPriv = int32_t(0x81010109);   // not the item's owner
 
 } // namespace tdort::abi

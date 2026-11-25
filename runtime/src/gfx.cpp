@@ -53,11 +53,12 @@ static inline uint32_t display_pixel(uint32_t pix, int y, const std::vector<uint
 }
 
 const uint32_t* Gfx::scan_out() {
-    if (display_addr_ == 0 || display_addr_ >= kRamEnd) return frame_.data();
-    const uint8_t* src = &mem_.ram[display_addr_];
     const int lines = std::clamp(display_lines_, 1, int(kHeight));
     const uint32_t bytes = kWidth * uint32_t(lines) * 2;
-    if (display_addr_ > kRamEnd - bytes) return frame_.data();
+    // No valid display buffer yet: the last picture stays (and is enlarged
+    // below, so out_frame() is always a full-size picture).
+    if (display_addr_ == 0 || display_addr_ >= kRamEnd || display_addr_ > kRamEnd - bytes) { scale_up(-1, lines); return frame_.data(); }
+    const uint8_t* src = &mem_.ram[display_addr_];
     std::fill(frame_.begin() + lines * kWidth, frame_.end(), 0u);
     for (int y = 0; y < lines; ++y) {
         for (int x = 0; x < kWidth; ++x) {
@@ -73,38 +74,43 @@ const uint32_t* Gfx::scan_out() {
             frame_[y * kWidth + x] = display_pixel(pix, y, clut_);
         }
     }
-    if (scale_ > 1) {
-        const int s = scale_, W = kWidth * s;
-        hi_frame_.resize(size_t(W) * kHeight * s);
-        const int k = lrform ? shadow_for(display_addr_, kWidth, lines, false) : -1;
-        if (k >= 0) {
-            Shadow& sh = shadows_[size_t(k)];
-            sync(sh);
-            const int hl = std::min(lines, sh.h) * s;
-            const bool has_clut = clut_.size() >= size_t(kHeight) * 32;
-            if (!has_clut && rgb_lut_.empty()) {
-                rgb_lut_.resize(65536);
-                for (uint32_t v = 0; v < 65536; ++v) rgb_lut_[v] = rgb555_to_xrgb(v & 0x7FFF);
-            }
-            for (int Y = 0; Y < hl; ++Y) {
-                const uint16_t* row = &sh.hi[size_t(Y) * W];
-                uint32_t* out = &hi_frame_[size_t(Y) * W];
-                if (!has_clut) for (int X = 0; X < W; ++X) out[X] = rgb_lut_[row[X]];
-                else for (int X = 0; X < W; ++X) out[X] = display_pixel(row[X], Y / s, clut_);
-            }
-            std::fill(hi_frame_.begin() + long(hl) * W, hi_frame_.end(), 0u);
-        } else {                          // nothing drawn by cels: the 1x picture, enlarged
-            for (int Y = 0; Y < kHeight * s; ++Y) {
-                const uint32_t* in = &frame_[size_t(Y / s) * kWidth];
-                uint32_t* out = &hi_frame_[size_t(Y) * W];
-                for (int X = 0; X < W; ++X) out[X] = in[X / s];
-            }
-        }
-    }
+    scale_up(lrform ? shadow_for(display_addr_, kWidth, lines, false) : -1, lines);
     return frame_.data();
 }
 
 // ---- hi-res shadows -----------------------------------------------------------
+
+// The out_frame() picture at scale 2..4: the shadow k of the display buffer
+// (-1: none), else the 1x picture enlarged.
+void Gfx::scale_up(int k, int lines) {
+    if (scale_ <= 1) return;
+    const int s = scale_, W = kWidth * s;
+    hi_frame_.resize(size_t(W) * kHeight * s);
+    if (k >= 0) {
+        Shadow& sh = shadows_[size_t(k)];
+        sync(sh);
+        const int hl = std::min(lines, sh.h) * s;
+        const bool has_clut = clut_.size() >= size_t(kHeight) * 32;
+        if (!has_clut && rgb_lut_.empty()) {
+            rgb_lut_.resize(65536);
+            for (uint32_t v = 0; v < 65536; ++v) rgb_lut_[v] = rgb555_to_xrgb(v & 0x7FFF);
+        }
+        for (int Y = 0; Y < hl; ++Y) {
+            const uint16_t* row = &sh.hi[size_t(Y) * W];
+            uint32_t* out = &hi_frame_[size_t(Y) * W];
+            if (!has_clut) for (int X = 0; X < W; ++X) out[X] = rgb_lut_[row[X]];
+            else for (int X = 0; X < W; ++X) out[X] = display_pixel(row[X], Y / s, clut_);
+        }
+        std::fill(hi_frame_.begin() + long(hl) * W, hi_frame_.end(), 0u);
+    } else {                          // nothing drawn by cels: the 1x picture, enlarged
+        for (int Y = 0; Y < kHeight * s; ++Y) {
+            const uint32_t* in = &frame_[size_t(Y / s) * kWidth];
+            uint32_t* out = &hi_frame_[size_t(Y) * W];
+            for (int X = 0; X < W; ++X) out[X] = in[X / s];
+        }
+    }
+}
+
 
 void Gfx::set_scale(int s) {
     s = std::clamp(s, 1, 4);

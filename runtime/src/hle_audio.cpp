@@ -108,7 +108,10 @@ bool Portfolio::parse_aiff(const uint8_t* d, size_t n, Audio::Sample& s, size_t&
 }
 
 int32_t Portfolio::audio_new(uint8_t type, const std::string& name) {
-    return new_item(ItemKind::Generic, kSubsysAudio, type, 64, name).num;
+    const int32_t n = new_item(ItemKind::Generic, kSubsysAudio, type, 64, name).num;
+    static const bool log_items = std::getenv("TDORT_LOG_AUDIO_ITEMS") != nullptr;
+    if (log_items) rt.log("audio item %d: type %u \"%s\" (task %d)", n, type, name.c_str(), cur().item);
+    return n;
 }
 
 // vpp4.dsp's lookup tables, from the game's own copy of the file: its DINI
@@ -441,8 +444,8 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
     };
     av[-1]  = [this](Cpu*) { c.r[0] = uint32_t(audio_template(rstr(arg(0)))); };            // LoadInsTemplate
     av[-2]  = [this](Cpu*) { c.r[0] = uint32_t(audio_instrument(int32_t(arg(0)))); };       // AllocInstrument
-    av[-24] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // UnloadInstrument
-    av[-23] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // UnloadInsTemplate
+    av[-24] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // UnloadInstrument
+    av[-23] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // UnloadInsTemplate
     av[-25] = [this](Cpu*) {                                                                // FindAudioDevice
         if (!audio_device_) audio_device_ = audio_new(0, "audio");
         c.r[0] = uint32_t(audio_device_);
@@ -455,7 +458,7 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
     };
     av[-28] = [this](Cpu*) { c.r[0] = 1; };                                                 // GetNumInstruments
     av[-47] = [this](Cpu*) { c.r[0] = uint32_t(audio_instrument(int32_t(arg(0)))); };       // CreateInstrument(template, tags)
-    av[-48] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DeleteInstrument
+    av[-48] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // DeleteInstrument
     // DSP resource queries (deprecated in the SDK): nothing is reported as used.
     av[-13] = [this](Cpu*) { c.r[0] = 0; };                                                 // DSPGetRsrcAlloc
     av[-21] = [this](Cpu*) { c.r[0] = 0; };                                                 // DSPGetInsRsrcUsed
@@ -547,22 +550,22 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
         c.r[0] = uint32_t(item);
     };
     av[-40] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DeleteDelayLine
-    av[-11] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // UnloadSample
+    av[-11] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // UnloadSample
     av[-6]  = [this](Cpu*) { c.r[0] = 0; };                                                 // DebugSample
 
     // ---- attachments and envelopes
     av[-36] = [this](Cpu*) {                                 // AttachSample(ins, sample, fifo)
         c.r[0] = uint32_t(attach(int32_t(arg(0)), int32_t(arg(1)), 0, arg(2) ? rstr(arg(2)) : "", 0, 0));
     };
-    av[-37] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DetachSample
+    av[-37] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // DetachSample
     av[-32] = [this](Cpu*) {                                 // AttachEnvelope(ins, env, name)
         c.r[0] = uint32_t(attach(int32_t(arg(0)), 0, int32_t(arg(1)), arg(2) ? rstr(arg(2)) : "Env", 0, 0));
     };
-    av[-33] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DetachEnvelope
+    av[-33] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // DetachEnvelope
     av[-34] = [this](Cpu*) {                                 // CreateEnvelope(points, n, susBegin, susEnd)
         c.r[0] = uint32_t(make_envelope(arg(0), arg(1), int32_t(arg(2)), int32_t(arg(3))));
     };
-    av[-35] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DeleteEnvelope
+    av[-35] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // DeleteEnvelope
 
     // ---- tuning and information
     av[-29] = [this](Cpu*) { c.r[0] = 0x10000; };                                           // GetMasterTuning

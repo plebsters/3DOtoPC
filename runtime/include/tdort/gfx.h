@@ -55,9 +55,9 @@ public:
     int  scale() const { return scale_; }
     // The picture to show: out_width() x out_height() (320*scale x 240*scale).
     // scan_out() must run first. At scale 1 it is the scan_out() picture.
-    const uint32_t* out_frame() const { return scale_ > 1 ? hi_frame_.data() : frame_.data(); }
-    int out_width() const { return kWidth * scale_; }
-    int out_height() const { return kHeight * scale_; }
+    const uint32_t* out_frame() const { return scale_ > 1 && !hi_frame_.empty() ? hi_frame_.data() : frame_.data(); }
+    int out_width() const { return scale_ > 1 && !hi_frame_.empty() ? kWidth * scale_ : kWidth; }
+    int out_height() const { return scale_ > 1 && !hi_frame_.empty() ? kHeight * scale_ : kHeight; }
     // The game's side wrote guest memory [addr, addr+len) (SPORT): the
     // shadows take those pixels from the bitmap even if the value is the same.
     void note_write(uint32_t addr, uint32_t len);
@@ -88,6 +88,7 @@ private:
     };
     int  shadow_for(uint32_t buffer, int w, int h, bool create);
     void sync(Shadow& s);
+    void scale_up(int shadow, int lines);
     void fill_quad_hi(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]);
 
     uint16_t fb_read(const CelTarget& t, int x, int y) const;

@@ -442,6 +442,8 @@ Environment variables:
 | `TDORT_OLD_SEMAPHORE=1` | `UnlockSemaphore` frees the semaphore and lets the waiters retry instead of giving it to the first waiter |
 | `TDORT_OLD_HELD_BUTTONS=1` | a new event listener's update frames include buttons that were already held when it started |
 | `TDORT_OLD_CONTROLMEM_SCREENS=1` | a screen group still frees a frame buffer its task gave to another task with `ControlMem` |
+| `TDORT_OLD_DELETE_ANY=1` | any task may delete any item (the console allows only the owner) |
+| `TDORT_LOG_AUDIO_ITEMS=1` | logs every audio item made and every item deleted (debugging) |
 | `TDORT_SCALE=1..4` | internal resolution, overriding the F12 setting (headless snapshots are taken at that size too) |
 | `TDORT_TRACE_FROM=<frame>` | turns on `--trace` logging at that frame (debugging a long session) |
 | `TDORT_SMALL_ALLOC_FLOOR_KB=0` | no 32 KB floor for small allocations (the size in KB; 0 turns it off) |
@@ -655,6 +657,15 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* Every game crashed at start-up on Windows in the package with the new detail setting
+  (Crash 'n Burn, Killing Time, Road Rash...): until a game shows its first screen, the
+  finer picture was empty and the window read from a null pointer. Fixed; the headless
+  platform now reads every presented picture too, so tests catch this.
+* Sailor Moon S's fights had no sound and stood still (timer stuck at 99). Its music
+  thread "unloads" the fight's mixer when a track ends, but the mixer belongs to the main
+  task; on the console that DeleteItem fails (only the owner may delete an item), here it
+  worked and the mixer was gone. DeleteItem and the audio Unload/Delete calls now refuse
+  items the calling task doesn't own (`TDORT_OLD_DELETE_ANY=1`: as before).
 * Higher internal resolution (F12, `TDORT_SCALE`): every cel drawn into a screen-sized
   bitmap is also drawn into a 2x-4x copy of it, with the same pixel processor, so 3D games
   (Crash 'n Burn's tracks, for example) show smooth polygon edges and far textures in full.
