@@ -220,6 +220,14 @@ private:
     uint32_t putc_loop_ = 0;                                          // ARM loop that feeds vfprintf text to the C library's putc                                     // instruments given up with AbandonInstrument  // attached to a template: copied to each instrument made from it
     std::map<int32_t, std::pair<int32_t, std::string>> knobs_;      // knob item -> (instrument, knob name)
     std::map<int32_t, int32_t> cue_owner_;                          // cue item -> task that created it
+    // Samples whose memory came from the game's own allocator (DefineSampleHere
+    // with CustomAllocMem): UnloadSample hands it back to the game's free function.
+    struct CustomSampleMem { uint32_t free_fn = 0, block = 0, size = 0; };
+    std::map<int32_t, CustomSampleMem> custom_sample_mem_;
+    // A folio call waiting for a game function it called (per task, innermost last).
+    struct GuestCallback { int kind = 0; uint32_t ret = 0, img = 0, len = 0, off = 0, free_fn = 0; Audio::Sample sample; };
+    std::map<int32_t, std::vector<GuestCallback>> guest_callbacks_;
+    uint32_t trap_define_done_ = 0, trap_unload_done_ = 0;
     std::map<std::string, uint32_t> knob_name_strings_;
     int32_t audio_device_ = 0;
     uint32_t pixel_address(int32_t item, int32_t x, int32_t y);

@@ -380,6 +380,7 @@ int32_t Portfolio::create_audio_item(uint8_t type, uint32_t tags, const std::str
 
 void Portfolio::audio_deleted(HleItem& it) {
     if (Audio::Sample* s = rt.audio->sample(it.num)) if (s->host_alloc) free_mem(s->host_alloc);
+    custom_sample_mem_.erase(it.num);
     rt.audio->remove(it.num);
     knobs_.erase(it.num);
     templates_.erase(it.num);
@@ -501,23 +502,43 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
     av[-3]  = [this](Cpu*) { last_load_bytes_ = 0; const std::string n = rstr(arg(0)); c.r[0] = uint32_t(load_sample(n, false, 0)); if (last_load_bytes_) cd_load_wait(last_load_bytes_, n); };     // LoadSample
     av[-38] = [this](Cpu*) { last_load_bytes_ = 0; const std::string n = rstr(arg(0)); c.r[0] = uint32_t(load_sample(n, false, 0)); if (last_load_bytes_) cd_load_wait(last_load_bytes_, n); };     // LoadSampleHere
     av[-12] = [this](Cpu*) { last_load_bytes_ = 0; const std::string n = rstr(arg(0)); c.r[0] = uint32_t(load_sample(n, true, arg(1))); if (last_load_bytes_) cd_load_wait(last_load_bytes_, n); }; // ScanSample(name, bufsize)
-    av[-41] = [this](Cpu*) {                                 // DefineSampleHere(image, numbytes, alloc, free)
-        const uint32_t img = arg(0), nb = arg(1);
+    // DefineSampleHere(image, numbytes, alloc, free): the folio copies the
+    // sound out of the image into memory from the caller's alloc function
+    // (size + 4 bytes, MEMTYPE_AUDIO; the size is kept in the first word), and
+    // UnloadSample gives it back through the caller's free function. Family
+    // Feud's file cache passes its own pair: an image stays locked in the cache
+    // until its free function is called, so without the calls the cache never
+    // emptied and the game ran out of memory a few questions in. The game's
+    // function runs as a call from the folio: it returns to a trap here, which
+    // finishes the job (TDORT_OLD_DEFINE_SAMPLE=2: copy from the OS's memory).
+    av[-41] = [this](Cpu*) {
+        const uint32_t img = arg(0), nb = arg(1), alloc_fn = arg(2), free_fn = arg(3);
         if (!guest_range_ok(img, nb)) { c.r[0] = uint32_t(kErrBadPtr); return; }
         Audio::Sample s; size_t off = 0, len = 0; std::string why;
         if (!parse_aiff(&rt.mem.ram[img], nb, s, off, len, why)) {
             rt.log("DefineSampleHere: %s", why.c_str()); c.r[0] = uint32_t(kErrNotSupported); return;
         }
-        // The folio copies the sound out of the image into memory of its own
-        // (from the alloc function the caller passes, else AllocMem), so the
-        // image may be thrown away at once. Need for Speed loads each sound
-        // family into a scratch buffer, defines its samples, then reuses the
-        // buffer: played in place, the engine and crash sounds turned into
-        // static and clicks. The copy comes from the OS's memory here; the
-        // caller's free function is never needed for it. If that memory runs
+        static const char* old_env = std::getenv("TDORT_OLD_DEFINE_SAMPLE");
+        const bool old_define = old_env && std::string(old_env) == "1";
+        const bool os_copy = old_env && std::string(old_env) == "2";
+        if (!old_define && !os_copy && len && alloc_fn && free_fn && alloc_fn < kRamEnd && free_fn < kRamEnd) {
+            GuestCallback cb;
+            cb.kind = 1; cb.ret = c.r[15]; cb.img = img; cb.len = uint32_t(len); cb.off = uint32_t(off); cb.free_fn = free_fn;
+            s.data_offset = uint32_t(off); s.data_size = uint32_t(len);
+            cb.sample = s;
+            guest_callbacks_[cur().item].push_back(cb);
+            c.r[0] = uint32_t(len) + 4;
+            c.r[1] = 0x00100000u;            // MEMTYPE_AUDIO
+            c.r[14] = trap_define_done_;
+            c.r[15] = alloc_fn;
+            return;
+        }
+        // No allocator given: the copy comes from the OS's memory. Need for
+        // Speed loads each sound family into a scratch buffer, defines its
+        // samples, then reuses the buffer; played in place, the engine and
+        // crash sounds turned into static and clicks. If that memory runs
         // out, the sound stays where it is (TDORT_OLD_DEFINE_SAMPLE=1: always).
         s.addr = img + uint32_t(off);
-        static const bool old_define = std::getenv("TDORT_OLD_DEFINE_SAMPLE") != nullptr;
         if (!old_define && len) {
             const uint32_t a = alloc(uint32_t(len), kMemFromTop);
             if (a) {
@@ -532,8 +553,44 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
         s.data_offset = uint32_t(off); s.data_size = uint32_t(len);
         const int32_t item = audio_new(kAuSample, "");
         rt.audio->add_sample(item, s);
+        static const bool log_items = std::getenv("TDORT_LOG_AUDIO_ITEMS") != nullptr;
+        if (log_items) rt.log("DefineSampleHere(%08X, %u) -> %d", img, nb, item);
         c.r[0] = uint32_t(item);
     };
+    // The game's alloc function returned (r0 = its memory, or 0).
+    trap_define_done_ = rt.register_trap("DefineSampleHere (after the game's alloc)", [this](Cpu*) {
+        auto& stack = guest_callbacks_[cur().item];
+        if (stack.empty() || stack.back().kind != 1) { rt.log("DefineSampleHere: alloc returned with nothing waiting"); c.halted = true; return; }
+        GuestCallback cb = stack.back();
+        stack.pop_back();
+        c.r[15] = cb.ret;
+        const uint32_t p = c.r[0];
+        if (!p || !guest_range_ok(p, cb.len + 4)) {
+            rt.log("DefineSampleHere: the game's alloc gave no memory for %u bytes", cb.len + 4);
+            c.r[0] = uint32_t(kErrNoMem);
+            return;
+        }
+        w32(p, cb.len);
+        std::vector<uint8_t> tmp(rt.mem.ram.begin() + cb.img + cb.off, rt.mem.ram.begin() + cb.img + cb.off + cb.len);
+        rt.mem.write_block(p + 4, tmp.data(), cb.len);
+        Audio::Sample s = cb.sample;
+        s.addr = p + 4;
+        s.host_alloc = 0;
+        const int32_t item = audio_new(kAuSample, "");
+        rt.audio->add_sample(item, s);
+        custom_sample_mem_[item] = {cb.free_fn, p, cb.len + 4};
+        static const bool log_items = std::getenv("TDORT_LOG_AUDIO_ITEMS") != nullptr;
+        if (log_items) rt.log("DefineSampleHere(%08X, %u bytes) -> %d in the game's memory at %08X", cb.img, cb.len, item, p + 4);
+        c.r[0] = uint32_t(item);
+    });
+    // The game's free function returned: UnloadSample's result is 0.
+    trap_unload_done_ = rt.register_trap("UnloadSample (after the game's free)", [this](Cpu*) {
+        auto& stack = guest_callbacks_[cur().item];
+        if (stack.empty() || stack.back().kind != 2) { rt.log("UnloadSample: free returned with nothing waiting"); c.halted = true; return; }
+        c.r[15] = stack.back().ret;
+        stack.pop_back();
+        c.r[0] = 0;
+    });
     av[-14] = [this](Cpu*) { c.r[0] = uint32_t(make_sample(arg(0), arg(1))); };             // MakeSample(bytes, tags)
     av[-44] = [this](Cpu*) {                                                                // CreateSample(tags)
         if (std::getenv("TDORT_SLEEP_TRACE"))
@@ -550,7 +607,20 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
         c.r[0] = uint32_t(item);
     };
     av[-40] = [this](Cpu*) { c.r[0] = uint32_t(delete_item(int32_t(arg(0)))); };            // DeleteDelayLine
-    av[-11] = [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); };            // UnloadSample
+    av[-11] = [this](Cpu*) {                                                                // UnloadSample
+        const int32_t item = int32_t(arg(0));
+        const auto cm = custom_sample_mem_.find(item);
+        const CustomSampleMem mem = cm != custom_sample_mem_.end() ? cm->second : CustomSampleMem{};
+        const int32_t r = game_delete_item(item);
+        c.r[0] = uint32_t(r);
+        if (r == 0 && mem.free_fn) {       // the sound's memory goes back to the game's free function
+            GuestCallback cb; cb.kind = 2; cb.ret = c.r[15];
+            guest_callbacks_[cur().item].push_back(cb);
+            c.r[0] = mem.block; c.r[1] = mem.size;
+            c.r[14] = trap_unload_done_;
+            c.r[15] = mem.free_fn;
+        }
+    };
     av[-6]  = [this](Cpu*) { c.r[0] = 0; };                                                 // DebugSample
 
     // ---- attachments and envelopes

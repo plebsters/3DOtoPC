@@ -50,6 +50,15 @@ struct Win32Platform : Platform {
     enum Look { LookSharp, LookSmooth, LookScanlines, kLooks };
     int scale = 3, fit = Fit43, look = LookSharp;
     int detail = kDefaultDetail;          // internal resolution, 1..4
+    bool show_fps = false;                // Ctrl+F frame counter
+    std::string fps_text;
+    // Frame counter: frames shown, picture changes and work time in the
+    // current second (work: from the end of one frame's wait to the start of
+    // the next, i.e. running the game and drawing its picture).
+    std::chrono::steady_clock::time_point fps_since = std::chrono::steady_clock::now(), woke = std::chrono::steady_clock::now();
+    int fps_frames = 0, fps_changes = 0;
+    double fps_work = 0, fps_work_max = 0;
+    uint64_t last_hash = 0;
     bool fullscreen = false;
     int state_slot = 1, state_req = 0;    // save states: slot, and 1 = save / 2 = load asked for
     WINDOWPLACEMENT saved_place{sizeof(WINDOWPLACEMENT)};
@@ -81,13 +90,14 @@ struct Win32Platform : Platform {
             else if (std::sscanf(line, "look=%d", &v) == 1) look = std::clamp(v, 0, int(kLooks) - 1);
             else if (std::sscanf(line, "fullscreen=%d", &v) == 1) fullscreen = v != 0;
             else if (std::sscanf(line, "detail=%d", &v) == 1) detail = std::clamp(v, 1, 4);
+            else if (std::sscanf(line, "fps=%d", &v) == 1) show_fps = v != 0;
         }
         std::fclose(f);
     }
     void save_settings() {
         FILE* f = _wfopen(settings_path().c_str(), L"w");
         if (!f) return;
-        std::fprintf(f, "scale=%d\nfit=%d\nlook=%d\nfullscreen=%d\ndetail=%d\n", scale, fit, look, fullscreen ? 1 : 0, detail);
+        std::fprintf(f, "scale=%d\nfit=%d\nlook=%d\nfullscreen=%d\ndetail=%d\nfps=%d\n", scale, fit, look, fullscreen ? 1 : 0, detail, show_fps ? 1 : 0);
         std::fclose(f);
     }
     void say(const std::string& text, int ms = 2000, int tab = 6) {
@@ -188,10 +198,15 @@ struct Win32Platform : Platform {
 
     // Display hotkeys; true if the key was one of them.
     bool display_key(uint32_t vk) {
+        if (vk == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            show_fps = !show_fps; save_settings();
+            say(show_fps ? "Frame counter on (Ctrl+F to hide)" : "Frame counter off");
+            return true;
+        }
         switch (vk) {
         case VK_F1:
             say("F2\tButton mapping\nF5\tSave state (slot " + std::to_string(state_slot) + ")\nF6\tLoad state\nF3\tChange save slot\n"
-                "F4\tNext disc\nF7\tWindow size\nF8\tPicture shape\nF9\tLook\nF10\tScreenshot\nF11\tFullscreen\nF12\tDetail (resolution)", 6000);
+                "F4\tNext disc\nF7\tWindow size\nF8\tPicture shape\nF9\tLook\nF10\tScreenshot\nF11\tFullscreen\nF12\tDetail (resolution)\nCtrl+F\tFrame counter", 6000);
             return true;
         case VK_F2:
             toggle_controls();
@@ -415,12 +430,11 @@ struct Win32Platform : Platform {
     // rounded, see-through panel in the top-left corner, fading out at the end.
     // The text is drawn once per message and size into a coverage mask, then
     // blended over the picture every frame.
-    std::string mask_text;
-    int mask_px = 0, mask_w = 0, mask_h = 0, mask_tab = 6;
-    std::vector<uint8_t> mask;            // text coverage, 0..255
+    struct TextMask { std::string text; int px = 0, w = 0, h = 0, tab = 6; std::vector<uint8_t> m; };   // text coverage, 0..255
+    TextMask osd_mask, fps_mask;
 
-    void build_mask(const std::string& text, int px, int tab) {
-        mask_text = text; mask_px = px; mask_tab = tab; mask_w = mask_h = 0; mask.clear();
+    void build_mask(TextMask& tm, const std::string& text, int px, int tab) {
+        tm.text = text; tm.px = px; tm.tab = tab; tm.w = tm.h = 0; tm.m.clear();
         const int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), int(text.size()), nullptr, 0);
         std::wstring w(size_t(std::max(0, n)), L'\0');
         if (n > 0) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), int(text.size()), &w[0], n);
@@ -433,25 +447,25 @@ struct Win32Platform : Platform {
         const UINT flags = DT_LEFT | DT_TOP | DT_NOPREFIX | DT_EXPANDTABS | DT_TABSTOP;
         RECT r{0, 0, 4096, 0};
         DrawTextExW(dc, &w[0], int(w.size()), &r, flags | DT_CALCRECT, &tabs);
-        mask_w = std::max(1, int(r.right)); mask_h = std::max(1, int(r.bottom));
+        tm.w = std::max(1, int(r.right)); tm.h = std::max(1, int(r.bottom));
         BITMAPINFO bi{}; bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-        bi.bmiHeader.biWidth = mask_w; bi.bmiHeader.biHeight = -mask_h;
+        bi.bmiHeader.biWidth = tm.w; bi.bmiHeader.biHeight = -tm.h;
         bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
         void* bits = nullptr;
         HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
         if (bmp && bits) {
             HGDIOBJ old_bmp = SelectObject(dc, bmp);
-            std::memset(bits, 0, size_t(mask_w) * mask_h * 4);
+            std::memset(bits, 0, size_t(tm.w) * tm.h * 4);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, RGB(255, 255, 255));
-            RECT tr{0, 0, mask_w, mask_h};
+            RECT tr{0, 0, tm.w, tm.h};
             DrawTextExW(dc, &w[0], int(w.size()), &tr, flags, &tabs);
             GdiFlush();
             const uint32_t* p = static_cast<const uint32_t*>(bits);
-            mask.resize(size_t(mask_w) * mask_h);
-            for (size_t k = 0; k < mask.size(); ++k) {     // grey text: any channel is the coverage
+            tm.m.resize(size_t(tm.w) * tm.h);
+            for (size_t k = 0; k < tm.m.size(); ++k) {     // grey text: any channel is the coverage
                 const uint32_t v = p[k];
-                mask[k] = uint8_t(std::max({v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF}));
+                tm.m[k] = uint8_t(std::max({v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF}));
             }
             SelectObject(dc, old_bmp);
         }
@@ -461,19 +475,13 @@ struct Win32Platform : Platform {
         DeleteDC(dc);
     }
 
-    void draw_osd(int bw, int bh) {
-        if (osd.empty()) return;
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= osd_until) { osd.clear(); return; }
-        const double left_ms = std::chrono::duration<double, std::milli>(osd_until - now).count();
-        const double fade = std::min(1.0, left_ms / 300.0);            // fades out over the last 0.3 s
-        const int px = std::clamp(bh / 32, 13, 34);                      // text size follows the picture
-        if (osd != mask_text || px != mask_px || osd_tab != mask_tab) build_mask(osd, px, osd_tab);
-        if (mask.empty()) return;
-        const int pad_x = px * 3 / 4, pad_y = px / 2, margin = std::max(6, px / 2);
+    // A rounded, see-through panel with white text at (x0, y0) of the picture.
+    void draw_panel(const TextMask& tm, int bw, int bh, int x0, int y0, double fade) {
+        const int px = tm.px;
+        const int pad_x = px * 3 / 4, pad_y = px / 2;
         const int radius = std::max(4, px / 2);
-        const int x0 = margin, y0 = margin;
-        const int pw = std::min(mask_w + pad_x * 2, bw - x0), ph = std::min(mask_h + pad_y * 2, bh - y0);
+        if (x0 < 0 || y0 < 0) return;
+        const int pw = std::min(tm.w + pad_x * 2, bw - x0), ph = std::min(tm.h + pad_y * 2, bh - y0);
         if (pw <= 0 || ph <= 0) return;
         const int panel_a = int(190 * fade);                             // about 75% black
         const int text_a = int(255 * fade);
@@ -492,16 +500,38 @@ struct Win32Platform : Platform {
                 const uint32_t a = uint32_t(panel_a * cov >> 8);
                 uint32_t p = row[x];
                 p = (((p & 0xFF00FF) * (256 - a)) >> 8 & 0xFF00FF) | (((p & 0x00FF00) * (256 - a)) >> 8 & 0x00FF00);
-                // The text, white, over the panel.
                 const int tx = x - pad_x, ty = y - pad_y;
-                if (tx >= 0 && ty >= 0 && tx < mask_w && ty < mask_h) {
-                    const uint32_t t = uint32_t(mask[size_t(ty) * mask_w + tx]) * uint32_t(text_a) / 255;
+                if (tx >= 0 && ty >= 0 && tx < tm.w && ty < tm.h) {
+                    const uint32_t t = uint32_t(tm.m[size_t(ty) * tm.w + tx]) * uint32_t(text_a) / 255;
                     if (t) p = (((p & 0xFF00FF) * (256 - t) + 0xFF00FF * t) >> 8 & 0xFF00FF)
                              | (((p & 0x00FF00) * (256 - t) + 0x00FF00 * t) >> 8 & 0x00FF00);
                 }
                 row[x] = p;
             }
         }
+    }
+    void draw_osd(int bw, int bh) {
+        if (osd.empty()) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= osd_until) { osd.clear(); return; }
+        const double left_ms = std::chrono::duration<double, std::milli>(osd_until - now).count();
+        const double fade = std::min(1.0, left_ms / 300.0);            // fades out over the last 0.3 s
+        const int px = std::clamp(bh / 32, 13, 34);                      // text size follows the picture
+        if (osd != osd_mask.text || px != osd_mask.px || osd_tab != osd_mask.tab) build_mask(osd_mask, osd, px, osd_tab);
+        if (osd_mask.m.empty()) return;
+        const int margin = std::max(6, px / 2);
+        draw_panel(osd_mask, bw, bh, margin, margin, fade);
+    }
+    // Ctrl+F: frames per second (the window's, and how often the game's
+    // picture changed) and the time each frame took to make, top right.
+    void draw_fps(int bw, int bh) {
+        if (!show_fps || fps_text.empty()) return;
+        const int px = std::clamp(bh / 40, 11, 26);
+        if (fps_text != fps_mask.text || px != fps_mask.px) build_mask(fps_mask, fps_text, px, 6);
+        if (fps_mask.m.empty()) return;
+        const int margin = std::max(6, px / 2);
+        const int pw = fps_mask.w + (px * 3 / 4) * 2;
+        draw_panel(fps_mask, bw, bh, bw - margin - pw, margin, 1.0);
     }
 
     void blit(HDC dc) {
@@ -514,6 +544,7 @@ struct Win32Platform : Platform {
         box(cw, ch, bx, by, bw, bh);
         if (bw <= 0 || bh <= 0) return;
         scale_into(bw, bh);
+        draw_fps(bw, bh);
         draw_osd(bw, bh);
         BITMAPINFO bi{}; bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
         bi.bmiHeader.biWidth = bw; bi.bmiHeader.biHeight = -bh;
@@ -531,6 +562,12 @@ struct Win32Platform : Platform {
     int render_scale() override { return detail; }
 
     void present(const uint32_t* px, int w, int h) override {
+        if (show_fps) {                   // did the game's picture change? (a sample of its pixels)
+            uint64_t hsh = 1469598103934665603ull ^ uint64_t(w);
+            const size_t n = size_t(w) * h, step = std::max<size_t>(1, n / 4096) | 1;
+            for (size_t i = 0; i < n; i += step) hsh = (hsh ^ px[i]) * 1099511628211ull;
+            if (hsh != last_hash) { last_hash = hsh; ++fps_changes; }
+        }
         fw = w; fh = h; last.assign(px, px + size_t(w) * h);
         HDC dc = GetDC(hwnd); blit(dc); ReleaseDC(hwnd, dc);
     }
@@ -588,7 +625,18 @@ struct Win32Platform : Platform {
     void wait_frame(uint32_t hz) override {
         next += std::chrono::microseconds(1000000 / hz);
         auto now = std::chrono::steady_clock::now();
+        const double work = std::chrono::duration<double, std::milli>(now - woke).count();
+        ++fps_frames; fps_work += work; fps_work_max = std::max(fps_work_max, work);
+        if (now - fps_since >= std::chrono::seconds(1)) {
+            const double secs = std::chrono::duration<double>(now - fps_since).count();
+            char b[160];
+            std::snprintf(b, sizeof b, "%.0f fps  \xC2\xB7  game %.0f fps  \xC2\xB7  %.1f ms (max %.1f) of %.1f",
+                          fps_frames / secs, fps_changes / secs, fps_work / std::max(1, fps_frames), fps_work_max, 1000.0 / hz);
+            fps_text = b;
+            fps_since = now; fps_frames = fps_changes = 0; fps_work = fps_work_max = 0;
+        }
         if (next > now) std::this_thread::sleep_until(next); else next = now;
+        woke = std::chrono::steady_clock::now();
     }
 };
 

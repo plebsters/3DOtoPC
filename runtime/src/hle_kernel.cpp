@@ -417,6 +417,17 @@ uint32_t Portfolio::alloc(uint32_t size, uint32_t flags) {
             uint32_t total = 0, largest = 0;
             for (auto& [b, n] : free_dram_) { total += n; largest = std::max(largest, n); }
             rt.log("AllocMem(%u, %08X) failed: out of memory (DRAM free %u, largest block %u; lr=%08X)", size, flags, total, largest, c.r[14]);
+            static int dumps = 0;
+            if (std::getenv("TDORT_ALLOC_DUMP") && dumps++ < 2) {
+                std::vector<std::pair<uint32_t, uint32_t>> v(allocs_.begin(), allocs_.end());
+                std::sort(v.begin(), v.end(), [](auto& x, auto& y) { return x.second > y.second; });
+                uint32_t sum = 0; for (auto& [a2, n2] : v) sum += n2;
+                rt.log("  %zu allocations, %u bytes in use; largest:", v.size(), sum);
+                for (size_t i = 0; i < v.size() && i < 40; ++i) {
+                    auto o = alloc_owner_.find(v[i].first);
+                    rt.log("    %08X %7u owner %d", v[i].first, v[i].second, o == alloc_owner_.end() ? -1 : o->second);
+                }
+            }
         }
         return 0;
     }

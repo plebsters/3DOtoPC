@@ -1,6 +1,7 @@
 // tdort/gfx.h - 3DO video: framebuffer scan-out and a software CEL engine.
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include "memory.h"
 
@@ -20,7 +21,10 @@ class Gfx {
 public:
     static constexpr int kWidth = 320, kHeight = 240;
 
-    explicit Gfx(Memory& mem) : mem_(mem), frame_(kWidth * kHeight, 0) {}
+    explicit Gfx(Memory& mem);
+    ~Gfx();
+    Gfx(const Gfx&) = delete;
+    Gfx& operator=(const Gfx&) = delete;
 
     // lines: how many lines of the screen the display shows (its bitmap's
     // height); the lines below stay black, as on the console.
@@ -61,7 +65,7 @@ public:
     // The game's side wrote guest memory [addr, addr+len) (SPORT): the
     // shadows take those pixels from the bitmap even if the value is the same.
     void note_write(uint32_t addr, uint32_t len);
-    void drop_shadows() { shadows_.clear(); cur_ = -1; }
+    void drop_shadows();
 
 private:
     // CEL engine registers; fields a CCB does not load keep their last value.
@@ -72,6 +76,12 @@ private:
     } r_;
 
     struct Pixel { uint16_t color; uint8_t pmode; uint8_t amv_r, amv_g, amv_b; bool transparent; bool msb; };
+public:
+    // A decoded pixel as the pixel processor needs it (for the shadow workers).
+    struct PixelState { uint16_t color; uint8_t pmode, amv_r, amv_g, amv_b; bool msb; };
+    static uint16_t process_state(const PixelState& p, uint16_t fb, uint32_t pixc, uint32_t flags);
+private:
+    static uint16_t process_with(const Pixel& p, uint16_t fb, uint32_t pixc, uint32_t flags);
 
     void draw_one(const CelTarget& t, uint32_t source);
     Pixel decode(uint32_t raw, int bpp, bool uncoded) const;
@@ -89,7 +99,6 @@ private:
     int  shadow_for(uint32_t buffer, int w, int h, bool create);
     void sync(Shadow& s);
     void scale_up(int shadow, int lines);
-    void fill_quad_hi(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]);
 
     uint16_t fb_read(const CelTarget& t, int x, int y) const;
     void     fb_write(const CelTarget& t, int x, int y, uint16_t v);
@@ -106,6 +115,9 @@ private:
     uint64_t use_clock_ = 0;
     std::vector<uint32_t> hi_frame_;
     std::vector<uint32_t> rgb_lut_;       // 16-bit pixel -> XRGB, without a colour table
+    struct HiPool;                        // worker threads drawing the shadows (gfx.cpp)
+    std::unique_ptr<HiPool> pool_;
+    void hi_wait();                       // all queued shadow drawing done
 };
 
 } // namespace tdort

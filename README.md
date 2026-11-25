@@ -352,6 +352,7 @@ For testing without a window: `TDORT_STATE_SAVE=<frame>:<slot>` and `TDORT_STATE
 | F8 | Picture shape: **4:3** (black bars), **Pixel perfect** (4:3 at a whole-number size, so every pixel is the same size), **Stretch** to the window |
 | F9 | Look: **Sharp** pixels, **Smooth** (filtered), **Scanlines** (CRT-style dark lines; best at 3x or more) |
 | F11 or Alt+Enter | Fullscreen on and off (a borderless window over the whole monitor, so switching is instant) |
+| Ctrl+F | Frame counter (top right): frames per second the window shows, how many times a second the game's picture actually changed, and the milliseconds each frame took to make (average, worst, and the budget, 16.7 at 60 Hz). Over budget means the game slows down and the sound can click |
 | F12 | Detail: draws the game at 1x, 2x, 3x or 4x the 3DO's resolution (320x240 up to 1280x960). 3D games, and sprites that turn or shrink, get smooth edges and the full detail of far-away textures. 1x is the picture exactly as on the console. Default 2x |
 
 A short message in a rounded panel at the top left confirms each change (F1 lists every key). The settings are kept in
@@ -364,9 +365,11 @@ as on the console, so it behaves the same at every level. Each cel is also drawn
 time into a finer copy of the screen, and that copy is what you see. Pixels the game writes
 itself (movies, screen clears, some text) are copied into the finer picture as they are, so
 full-motion video and hand-drawn screens look the same as at 1x. The textures themselves are
-not changed: a wall close to the camera still shows its original texels. Higher levels cost
-CPU time: in a Crash 'n Burn race the whole game took about 60% more at 2x and about twice as
-much at 4x as at 1x. Go back to 2x or 1x if a game slows down. With **Sharp** look and a window size that is not a multiple of the detail level, pixel
+not changed: a wall close to the camera still shows its original texels. The finer
+picture is drawn by worker threads on your other CPU cores while the game runs on, so the
+game's own thread does little extra work; on a PC with few cores, 3x and 4x can still slow a
+game down (and then the sound clicks, since frames come late). Go back to 2x or 1x if that
+happens. With **Sharp** look and a window size that is not a multiple of the detail level, pixel
 edges can look uneven; **Smooth** (F9) or a matching size (F7) avoids that.
 
 ## Diagnosis report
@@ -428,7 +431,7 @@ Environment variables:
 | `TDORT_OLD_STREAM_DECODE=1` | each streamed SDX2/ADPCM buffer starts its decoder from zero |
 | `TDORT_OLD_MATH=1` | `multiply.dsp` and the other arithmetic instruments add their inputs, as before |
 | `TDORT_PRE0_BGND=1` | a cel's preamble BGND bit also keeps its 000 pixels opaque (old behaviour) |
-| `TDORT_OLD_DEFINE_SAMPLE=1` | `DefineSampleHere` plays the sound from the file image instead of a copy |
+| `TDORT_OLD_DEFINE_SAMPLE=1` | `DefineSampleHere` plays the sound from the file image instead of a copy (`=2`: copy into the OS's memory, not the game's allocator) |
 | `TDORT_OLD_BADSWI=1` | an SWI naming no folio (16 or more) returns 0 in r0 instead of being ignored |
 | `TDORT_OLD_WHERE_FRAMES=1` | `WhereAttachment` returns sample frames instead of a byte offset |
 | `TDORT_NO_VDL_CLUT=1` | colour words in a display list (VDL) are ignored; the standard ramp is used |
@@ -442,8 +445,11 @@ Environment variables:
 | `TDORT_OLD_SEMAPHORE=1` | `UnlockSemaphore` frees the semaphore and lets the waiters retry instead of giving it to the first waiter |
 | `TDORT_OLD_HELD_BUTTONS=1` | a new event listener's update frames include buttons that were already held when it started |
 | `TDORT_OLD_CONTROLMEM_SCREENS=1` | a screen group still frees a frame buffer its task gave to another task with `ControlMem` |
+| `TDORT_OLD_CARET=1` | "^" in a path goes one folder up instead of to the disc's root |
 | `TDORT_OLD_DELETE_ANY=1` | any task may delete any item (the console allows only the owner) |
 | `TDORT_LOG_AUDIO_ITEMS=1` | logs every audio item made and every item deleted (debugging) |
+| `TDORT_HI_THREADS=n` | worker threads drawing the finer picture (default: CPU threads - 1, at most 6; 0 = on the game's thread) |
+| `TDORT_HI_STATS=1` | prints how long the game waited for those workers (debugging) |
 | `TDORT_SCALE=1..4` | internal resolution, overriding the F12 setting (headless snapshots are taken at that size too) |
 | `TDORT_TRACE_FROM=<frame>` | turns on `--trace` logging at that frame (debugging a long session) |
 | `TDORT_SMALL_ALLOC_FLOOR_KB=0` | no 32 KB floor for small allocations (the size in KB; 0 turns it off) |
@@ -657,6 +663,28 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* The finer picture is now recorded one cel row at a time (8 bytes per pixel instead of a
+  60-byte command per pixel), so the game's own thread spends much less time on it: Slam
+  'n Jam's game play took 6.6 ms a frame at 2x and 8.8 at 4x here, against 7.8 and 10.2
+  before (4.9 at 1x). Ctrl+F shows a frame counter to check a game on your PC.
+* Family Feud ran out of memory a few questions into a game ("FILE Cache is now empty"),
+  then froze. DefineSampleHere takes the game's own alloc and free functions: the folio
+  copies the sound into memory from the game's alloc, and UnloadSample hands it back through
+  the game's free. Family Feud's file cache keeps a sound file locked until that free comes,
+  and the runtime never called either, so nothing ever left the cache. The runtime now calls
+  the game's functions as the folio does (`TDORT_OLD_DEFINE_SAMPLE=2`: copy into the OS's
+  memory as before); 8 minutes of play through the Bullseye rounds and the main board ran with
+  no memory errors. Save states from earlier packages can't be loaded (the format changed).
+* Higher detail levels slowed games down and made the sound click on your PC: all the extra
+  drawing ran on the game's thread. The finer picture is now drawn by worker threads (up to
+  6, one fewer than your CPU's threads), and the 3x/4x picture is converted for the window
+  on several cores. The picture is identical to drawing it on one thread
+  (`TDORT_HI_THREADS=0` does that).
+* Iron Angel of the Apocalypse said "Not enough memory" and showed an empty 3D view: its
+  files are named "^/IronManData/...", and "^" (the root of the filesystem being searched)
+  was read as "one folder up", so once it changed into a floor's folder nothing loaded.
+  Now "^" goes to the disc's root (`TDORT_OLD_CARET=1`: as before); the logos, title and
+  first floor (corridors, doors, map) work.
 * Every game crashed at start-up on Windows in the package with the new detail setting
   (Crash 'n Burn, Killing Time, Road Rash...): until a game shows its first screen, the
   finer picture was empty and the window read from a null pointer. Fixed; the headless

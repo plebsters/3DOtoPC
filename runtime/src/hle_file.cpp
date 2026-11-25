@@ -114,7 +114,15 @@ bool Portfolio::resolve(const std::string& guest, std::string& host, std::string
         }
         if (skip_fs_name) { skip_fs_name = false; continue; }
         if (c == ".") continue;
-        if (c == ".." || c == "^") { if (!clean.empty()) clean.pop_back(); continue; }
+        if (c == "..") { if (!clean.empty()) clean.pop_back(); continue; }
+        // "^" is the root of the filesystem being looked in (the disc), not
+        // the parent: Iron Angel changes to a floor's folder and then opens
+        // "^/IronManData/cell/startbk.cel". TDORT_OLD_CARET=1: one level up.
+        if (c == "^") {
+            static const bool old_caret = std::getenv("TDORT_OLD_CARET") != nullptr;
+            if (old_caret) { if (!clean.empty()) clean.pop_back(); } else clean.clear();
+            continue;
+        }
         clean.push_back(c);
     }
     // case-insensitive walk of the host tree, on the disc in the drive

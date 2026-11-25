@@ -52,6 +52,8 @@ struct StateIO {
     static void io(StateAr& a, Portfolio::ReadRec& r) { a(r.path); a(r.block); a(r.bytes); a(r.dest); a(r.frame); }
     static void io(StateAr& a, Portfolio::TemplateAttach& t) { a(t.item); a(t.sample); a(t.envelope); a(t.fifo); a(t.flags); a(t.start_at); }
     static void io(StateAr& a, Portfolio::DirList& d) { a(d.entries); a(d.next); }
+    static void io(StateAr& a, Portfolio::CustomSampleMem& m) { a(m.free_fn); a(m.block); a(m.size); }
+    static void io(StateAr& a, Portfolio::GuestCallback& g) { a(g.kind); a(g.ret); a(g.img); a(g.len); a(g.off); a(g.free_fn); a(g.sample); }
     static void io(StateAr& a, Portfolio::DiskStream& d) {
         a(d.size); a(d.pos); a(d.path);
         int64_t at = d.fp && a.saving ? int64_t(std::ftell(d.fp)) : 0;
@@ -113,6 +115,7 @@ struct StateIO {
         a(p.slice_start); a(p.mt);
         a(p.templates_); a(p.template_attach_); a(p.ins_template_); a(p.abandoned_); a(p.putc_loop_);
         a(p.knobs_); a(p.cue_owner_); a(p.knob_name_strings_); a(p.audio_device_);
+        a(p.custom_sample_mem_); a(p.guest_callbacks_);
         a(p.vdl_buffer_); a(p.screen_vdl_); a(p.screen_vdl_buffer_); a(p.vdl_clut_); a(p.dirs_); a(p.streams_);
         a(p.last_load_bytes_); a(p.cd_free_pos_); a(p.vbl_io_);
         a(p.tasks_); a(p.cur_); a(p.blocked_streak_); a(p.thread_exit_trap_); a(p.idle_trap_); a(p.io_quick_); a(p.idle_);
@@ -150,7 +153,7 @@ template <class T> void StateAr::io_struct(T& v) { StateIO::io(*this, v); }
 
 // File layout: magic, version, the game's LaunchMe hash, the frame, then the data.
 static constexpr char kMagic[8] = {'3', 'D', 'O', 'S', 'T', 'A', 'T', 'E'};
-static constexpr uint32_t kVersion = 6;
+static constexpr uint32_t kVersion = 7;
 
 static uint64_t checksum(const uint8_t* p, size_t n) {
     uint64_t h = 1469598103934665603ull;
