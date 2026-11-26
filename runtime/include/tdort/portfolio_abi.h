@@ -200,6 +200,7 @@ constexpr int32_t kErrBadItem = int32_t(0x81010101), kErrNoMem = int32_t(0x81010
                   kErrFsNoFile = int32_t(0xD556F101), kErrGrafBadClip = int32_t(0xD55B9115), kErrBadPtr = int32_t(0x81010104),
                   kErrNotSupported = int32_t(0x81010105), kErrBadCommand = int32_t(0x81010106),
                   kErrNoSignals = int32_t(0x81010107), kErrEof = int32_t(0x81010108),
-                  kErrBadPriv = int32_t(0x81010109);   // not the item's owner
+                  kErrBadPriv = int32_t(0x81010109),   // not the item's owner
+                  kErrIllegalSignal = int32_t(0x8101010A);   // a signal the task didn't allocate
 
 } // namespace tdort::abi

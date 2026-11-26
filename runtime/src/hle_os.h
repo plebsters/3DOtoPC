@@ -234,6 +234,7 @@ private:
     std::map<int32_t, uint32_t> vdl_buffer_;          // VDL item -> frame buffer it shows
     std::map<int32_t, int32_t>  screen_vdl_;          // screen -> VDL set on it
     std::map<int32_t, uint32_t> screen_vdl_buffer_;   // screen -> frame buffer from its VDL
+    std::map<int32_t, int32_t>  screen_default_vdl_;  // screen -> item standing for the VDL it was made with
     std::map<int32_t, std::vector<uint32_t>> vdl_clut_;   // VDL item -> per-line colour table (only if not linear)
     std::vector<uint32_t> parse_vdl_clut(uint32_t vdl, uint32_t words);
     struct DiskStream { FILE* fp; uint32_t size, pos; std::string path; };

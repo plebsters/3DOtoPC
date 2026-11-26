@@ -116,7 +116,7 @@ struct StateIO {
         a(p.templates_); a(p.template_attach_); a(p.ins_template_); a(p.abandoned_); a(p.putc_loop_);
         a(p.knobs_); a(p.cue_owner_); a(p.knob_name_strings_); a(p.audio_device_);
         a(p.custom_sample_mem_); a(p.guest_callbacks_);
-        a(p.vdl_buffer_); a(p.screen_vdl_); a(p.screen_vdl_buffer_); a(p.vdl_clut_); a(p.dirs_); a(p.streams_);
+        a(p.vdl_buffer_); a(p.screen_vdl_); a(p.screen_vdl_buffer_); a(p.vdl_clut_); a(p.screen_default_vdl_); a(p.dirs_); a(p.streams_);
         a(p.last_load_bytes_); a(p.cd_free_pos_); a(p.vbl_io_);
         a(p.tasks_); a(p.cur_); a(p.blocked_streak_); a(p.thread_exit_trap_); a(p.idle_trap_); a(p.io_quick_); a(p.idle_);
         a(p.phantom_children_); a(p.timed_signals_); a(p.cue_signals_); a(p.cue_signal_task_);
@@ -153,7 +153,7 @@ template <class T> void StateAr::io_struct(T& v) { StateIO::io(*this, v); }
 
 // File layout: magic, version, the game's LaunchMe hash, the frame, then the data.
 static constexpr char kMagic[8] = {'3', 'D', 'O', 'S', 'T', 'A', 'T', 'E'};
-static constexpr uint32_t kVersion = 7;
+static constexpr uint32_t kVersion = 8;
 
 static uint64_t checksum(const uint8_t* p, size_t n) {
     uint64_t h = 1469598103934665603ull;

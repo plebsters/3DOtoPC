@@ -83,6 +83,7 @@ bool Portfolio::resolve(const std::string& guest, std::string& host, std::string
     std::vector<std::string> clean;
     std::deque<std::string> todo;
     bool skip_fs_name = false;
+    std::string fs_name;                  // the filesystem named after the root ("cd-rom", "NVRAM", ...)
     auto queue = [&](const std::string& text, bool front) {
         // components of text, with "" for the root ("/x" -> "", "x")
         std::vector<std::string> comps;
@@ -112,7 +113,7 @@ bool Portfolio::resolve(const std::string& guest, std::string& host, std::string
             queue(value, true);
             continue;
         }
-        if (skip_fs_name) { skip_fs_name = false; continue; }
+        if (skip_fs_name) { skip_fs_name = false; fs_name = c; continue; }
         if (c == ".") continue;
         if (c == "..") { if (!clean.empty()) clean.pop_back(); continue; }
         // "^" is the root of the filesystem being looked in (the disc), not
@@ -149,6 +150,20 @@ bool Portfolio::resolve(const std::string& guest, std::string& host, std::string
         return fs::exists(cur, ec);
     };
     fs::path cur;
+    // "/NVRAM" itself is the save memory's folder, not the disc: Cyberia opens
+    // it to count the free space and its storage manager lists it; given the
+    // disc's root, it counted the disc's 12 MB as saves and refused to start
+    // ("not enough backup memory"). Files in it go through nvram_path.
+    if (ieq(fs_name, "nvram") && !std::getenv("TDORT_OLD_NVRAM_ROOT")) {
+        std::string nv;
+        nvram_path("/NVRAM/x", nv);       // makes the folder
+        const fs::path root = fs::u8path(nv).parent_path();
+        if (!walk(root, cur, normalized)) return false;
+        normalized = "/NVRAM" + (normalized == "/" ? std::string() : normalized);
+        is_dir = fs::is_directory(cur, ec);
+        host = cur.u8string();
+        return true;
+    }
     bool ok = walk(fs::u8path(disc_root()), cur, normalized);
     // A multi-disc game asking for a file that only another disc has: that
     // disc goes in, as when the player swaps discs at the game's prompt.
@@ -564,6 +579,8 @@ void Portfolio::install_file() {
         std::fseek(s.fp, long(s.pos), SEEK_SET);
         n = uint32_t(std::fread(tmp.data(), 1, n, s.fp));
         rt.mem.write_block(buf, tmp.data(), n);
+        static const bool dbg = std::getenv("TDORT_DEBUG_IO") != nullptr;
+        if (dbg) rt.log("ReadDiskStream(%08X %s, %08X, %u) at %u -> %u", arg(0), s.path.c_str(), buf, arg(2), s.pos, n);
         s.pos += n;
         w32(arg(0) + kStCursor, s.pos);
         c.r[0] = n;
@@ -577,6 +594,8 @@ void Portfolio::install_file() {
         const int64_t np = base + off;
         if (np < 0 || np > int64_t(s.size)) { c.r[0] = uint32_t(kErrBadPtr); return; }
         s.pos = uint32_t(np);
+        static const bool dbg = std::getenv("TDORT_DEBUG_IO") != nullptr;
+        if (dbg) rt.log("SeekDiskStream(%08X, %d, %u) -> %u", arg(0), off, arg(2), s.pos);
         w32(arg(0) + kStCursor, s.pos);
         c.r[0] = s.pos;
     };
@@ -762,7 +781,7 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
         rt.mem.write_block(rbuf, buf.data(), rlen);   // invalidates any recompiled code it overwrites
         recent_reads_.push_back({f.guest_path, offset, rlen, rbuf, frame_no_});
         if (std::getenv("TDORT_LOG_READS"))
-            rt.log("read %s block %u, %u bytes -> %08X (task %s)", f.guest_path.c_str(), offset, rlen, rbuf, cur().name.c_str());
+            rt.log("read %s block %u, %u bytes -> %08X (task %s, frame %u)", f.guest_path.c_str(), offset, rlen, rbuf, cur().name.c_str(), frame_no_);
         if (recent_reads_.size() > 8) recent_reads_.pop_front();
         if (rt.cfg.trace || std::getenv("TDORT_TRACE_READS"))
             rt.log("read %s block %u: %u bytes (%u from the file) -> %08X-%08X", f.guest_path.c_str(), offset, rlen, len, rbuf, rbuf + rlen);
@@ -838,6 +857,51 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
         std::string p = "/cd-rom" + (f.guest_path == "/" ? std::string() : f.guest_path);
         uint32_t n = std::min<uint32_t>(rlen ? rlen - 1 : 0, uint32_t(p.size()));
         if (rlen && guest_range_ok(rbuf, n + 1)) { rt.mem.write_block(rbuf, p.data(), n); w8(rbuf + n, 0); }
+        complete_io(ior, 0, n);
+        return;
+    }
+    case 12: {   // FILECMD_FSSTAT: the file system's size and free space
+        // Creature Shock checks the free save memory before it makes its
+        // settings file; with no answer it made none and kept every volume
+        // at 0, so the game was silent. NVRAM is 32 KB, its free space what
+        // the saved files leave; the disc has no free space.
+        // FileSystemStat { BitMap, CreateTime, BlockSize, Size, MaxFileSize, Free, Used }.
+        static const bool old_fsstat = std::getenv("TDORT_OLD_FSSTAT") != nullptr;
+        if (old_fsstat) { stub("file cmd 12"); complete_io(ior, kErrBadCommand, 0); return; }
+        std::string nv;
+        const bool nvram = f.guest_path.size() >= 6 && ieq(f.guest_path.substr(0, 6), "/nvram");
+        uint32_t bsize = kBlock, size = blocks, used = blocks, free_ = 0;
+        if (nvram) {
+            constexpr uint32_t kNvram = 32768, kPerFile = 64;   // a file's header in the save memory
+            uint64_t total = 0;
+            std::error_code ec;
+            if (nvram_path("/NVRAM/x", nv))
+                for (auto& de : fs::directory_iterator(fs::u8path(nv).parent_path(), ec))
+                    if (de.is_regular_file(ec)) total += de.file_size(ec) + kPerFile;
+            bsize = 1; size = kNvram;
+            used = uint32_t(std::min<uint64_t>(total, kNvram));
+            free_ = kNvram - used;
+        } else {
+            // The disc: its whole size (counted once from the extracted files), all in use.
+            static const uint32_t disc = [this] {
+                uint64_t b = 0; std::error_code ec;
+                for (auto it = fs::recursive_directory_iterator(fs::u8path(disc_root()), ec);
+                     !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+                    if (it->is_regular_file(ec)) b += (it->file_size(ec) + kBlock - 1) / kBlock;
+                return uint32_t(b);
+            }();
+            size = used = disc;
+        }
+        uint8_t st[28] = {};
+        store_be32(st + 0, 0x3E);                 // all fields but the creation time
+        store_be32(st + 8, bsize);
+        store_be32(st + 12, size);
+        store_be32(st + 16, free_);
+        store_be32(st + 20, free_);
+        store_be32(st + 24, used);
+        const uint32_t n = std::min<uint32_t>(rlen, sizeof st);
+        if (n && !guest_range_ok(rbuf, n)) { complete_io(ior, kErrBadPtr, 0); return; }
+        if (n) rt.mem.write_block(rbuf, st, n);
         complete_io(ior, 0, n);
         return;
     }

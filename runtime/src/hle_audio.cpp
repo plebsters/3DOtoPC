@@ -465,7 +465,22 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
     av[-21] = [this](Cpu*) { c.r[0] = 0; };                                                 // DSPGetInsRsrcUsed
     av[-22] = [this](Cpu*) { c.r[0] = 0; };                                                 // DSPGetTotalRsrcUsed
     av[-27] = [this](Cpu*) { c.r[0] = 0; };                                                 // (reserved)
-    av[-46] = [this](Cpu*) { c.r[0] = 0; };                                                 // GetAudioFolioInfo(tags): defaults
+    // GetAudioFolioInfo(tags): fills each tag's argument with a system-wide
+    // setting, as on a multiplayer: AF_TAG_SAMPLE_RATE (46) 44100 as 16.16,
+    // AF_TAG_AMPLITUDE (10) the master volume 0x7FFF. Creature Shock scales
+    // all its volumes by that master volume; left at 0 the game was silent.
+    // TDORT_OLD_FOLIO_INFO=1: fill nothing, as before.
+    av[-46] = [this](Cpu*) {
+        static const bool old_info = std::getenv("TDORT_OLD_FOLIO_INFO") != nullptr;
+        uint32_t t = arg(0);
+        for (int n = 0; !old_info && t && n < 64 && guest_range_ok(t, 8); ++n, t += 8) {
+            const uint32_t tag = r32(t);
+            if (tag == 0) break;                                    // TAG_END
+            if (tag == 46) w32(t + 4, 44100u << 16);
+            else if (tag == 10) w32(t + 4, 0x7FFF);
+        }
+        c.r[0] = 0;
+    };
     // Probes read a value inside an instrument; the DSP's internals are not
     // modelled, so a probe exists but reads 0 (ReadProbe, SWI 36).
     av[-49] = [this](Cpu*) {                                                                // CreateProbe(ins, output, tags)

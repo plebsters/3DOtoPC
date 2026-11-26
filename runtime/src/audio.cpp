@@ -124,7 +124,22 @@ void Audio::add_attachment(int32_t item, const Attachment& a) {
 }
 
 void Audio::remove(int32_t item) {
+    static const bool log_chain = std::getenv("TDORT_LOG_CHAIN") != nullptr;
     if (auto it = atts_.find(item); it != atts_.end()) {
+        if (log_chain && it->second.active) std::fprintf(stderr, "[audio] attachment %d deleted while playing (pos %.0f)\n", item, it->second.pos);
+        // An attachment that has played to its end has ended, even if the
+        // mixer has not noticed yet (it does at the next output frame): the
+        // linked one starts. Wing Commander III waits for WhereAttachment to
+        // reach the end, then detaches it at once; the link was lost with it,
+        // the chain of movie sound buffers broke and its movies went silent.
+        // TDORT_OLD_DETACH_LINK=1: the linked attachment does not start.
+        static const bool old_detach = std::getenv("TDORT_OLD_DETACH_LINK") != nullptr;
+        if (!old_detach && it->second.active && it->second.next) {
+            const Sample* smp = sample(it->second.sample);
+            if (smp && smp->bytes && it->second.pos * attachment_bytes_per_frame(item) >= double(smp->bytes)) {
+                if (Instrument* in = instrument(it->second.ins)) attachment_ended(item, it->second, *in);
+            }
+        }
         if (Instrument* in = instrument(it->second.ins))
             in->atts.erase(std::remove(in->atts.begin(), in->atts.end(), item), in->atts.end());
         for (auto& [id, a] : atts_) if (a.next == item) a.next = 0;
@@ -138,7 +153,10 @@ void Audio::remove(int32_t item) {
         return;
     }
     if (samples_.erase(item)) {
-        for (auto& [id, a] : atts_) if (a.sample == item) { a.sample = 0; a.active = false; }
+        for (auto& [id, a] : atts_) if (a.sample == item) {
+            if (log_chain && a.active) std::fprintf(stderr, "[audio] sample %d deleted while attachment %d plays it (pos %.0f)\n", item, id, a.pos);
+            a.sample = 0; a.active = false;
+        }
         return;
     }
     envelopes_.erase(item);
@@ -392,6 +410,8 @@ void Audio::vpp_run(Instrument& in) {
 
 void Audio::attachment_ended(int32_t id, Attachment& a, Instrument& in) {
     if (trace && in.data_duck) std::fprintf(stderr, "[audio] movie attachment %d ended at %.0f\n", id, a.pos);
+    static const bool log_chain = std::getenv("TDORT_LOG_CHAIN") != nullptr;
+    if ((trace || log_chain) && !a.next && in.kind == Kind::Sampler) std::fprintf(stderr, "[audio] attachment %d ended with nothing linked after it\n", id);
     a.active = false;
     if (a.cue && a.cue_at == -2 && on_cue) { ++cues_fired; on_cue(a.cue); }
     if (a.next) if (Attachment* n = attachment(a.next)) {
@@ -698,8 +718,8 @@ std::string Audio::describe() const {
         if (in.st == Instrument::St::Stopped) continue;
         int active = 0;
         for (int32_t a : in.atts) { auto it = atts_.find(a); if (it != atts_.end() && it->second.active) ++active; }
-        std::snprintf(b, sizeof b, " %d:%s%s%s(%d att, out %.2f)", id, in.tmpl.c_str(),
-                      in.st == Instrument::St::Released ? "/rel" : "", in.paused ? "/pause" : "", active,
+        std::snprintf(b, sizeof b, " %d:%s%s%s(%d/%d att, out %.2f)", id, in.tmpl.c_str(),
+                      in.st == Instrument::St::Released ? "/rel" : "", in.paused ? "/pause" : "", active, int(in.atts.size()),
                       std::max(std::fabs(in.out_l), std::fabs(in.out_r)));
         s += b;
     }

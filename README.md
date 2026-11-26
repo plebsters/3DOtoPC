@@ -445,7 +445,14 @@ Environment variables:
 | `TDORT_OLD_SEMAPHORE=1` | `UnlockSemaphore` frees the semaphore and lets the waiters retry instead of giving it to the first waiter |
 | `TDORT_OLD_HELD_BUTTONS=1` | a new event listener's update frames include buttons that were already held when it started |
 | `TDORT_OLD_CONTROLMEM_SCREENS=1` | a screen group still frees a frame buffer its task gave to another task with `ControlMem` |
+| `TDORT_OLD_WAIT_ANY=1` | `WaitSignal` on signals the task never allocated waits instead of failing at once |
+| `TDORT_OLD_NVRAM_ROOT=1` | "/NVRAM" (without a file name) is the disc's root, as before |
 | `TDORT_OLD_CARET=1` | "^" in a path goes one folder up instead of to the disc's root |
+| `TDORT_OLD_SETVDL=1` | `SetVDL` returns 0 for a screen that has no custom VDL yet (instead of the item for its own VDL) |
+| `TDORT_OLD_DETACH_LINK=1` | deleting an attachment that has played to its end does not start the attachment linked after it |
+| `TDORT_LOG_CHAIN=1` | logs sample attachments that end with nothing linked, or are deleted while playing (debugging) |
+| `TDORT_OLD_FOLIO_INFO=1` | `GetAudioFolioInfo` fills in nothing (sample rate and master volume stay 0) |
+| `TDORT_OLD_FSSTAT=1` | the file system query for size and free space (FSSTAT) is not answered |
 | `TDORT_OLD_DELETE_ANY=1` | any task may delete any item (the console allows only the owner) |
 | `TDORT_LOG_AUDIO_ITEMS=1` | logs every audio item made and every item deleted (debugging) |
 | `TDORT_HI_THREADS=n` | worker threads drawing the finer picture (default: CPU threads - 1, at most 6; 0 = on the game's thread) |
@@ -663,6 +670,44 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* Wing Commander III's movies went silent after the first minute (and most of the intro
+  had no sound). Its streamer chains small sound buffers with LinkAttachments, waits for
+  WhereAttachment to reach a buffer's end, then detaches it at once. The runtime noticed
+  the end only at the next output frame, so the buffer was deleted first and the link to
+  the next one went with it; the chain stopped. A buffer deleted after playing to its end
+  now starts the one linked after it, as the DSP does (`TDORT_OLD_DETACH_LINK=1`: as
+  before). The intro and the opening scenes play with sound throughout.
+* Dragon Lore's load-game screen and menus were covered in colour noise after the intro
+  movie. The movie shows through display lists (VDLs) with their own colour table; to go
+  back, the game hands SetVDL the item it got back from its first SetVDL, which on the
+  console is the VDL the screen was made with. The runtime returned 0 there, so the
+  "restore" changed nothing and the movie's colours stayed. A screen's own VDL now has an
+  item, and setting it back gives the screen its normal colours (`TDORT_OLD_SETVDL=1`: as
+  before). Save states from earlier packages can't be loaded (the format changed).
+* Creature Shock was silent: it reads the audio folio's master volume (GetAudioFolioInfo,
+  normally 0x7FFF) and scales every volume by it, and the runtime answered without filling
+  it in, so everything played at volume 0. The folio's settings are now returned: 44,100 Hz
+  and the master volume (`TDORT_OLD_FOLIO_INFO=1`: as before). Intro, music and effects play.
+* The file system query for size and free space (FSSTAT) is answered: the save memory is
+  32 KB with what the saved files leave free, the disc is full. Creature Shock checked it
+  before making its settings file and made none (`TDORT_OLD_FSSTAT=1`: not answered).
+* Flying Nightmares (no input in flight) needs no change: its flight commands are button
+  combos pressed together, e.g. L+Up / L+Down for the throttle and R+B to release the
+  brakes; the D-pad steers. Holding L first and then pressing Up counts as L alone, as on
+  the console.
+* Cyberia refused to start a game after the difficulty screen ("not enough backup memory...
+  there must be 600 bytes available") and opened the storage manager, which listed the disc's
+  own files as saves (12 MB used). "/NVRAM" itself was read as the disc's root (only
+  "/NVRAM/<file>" went to the save folder). "/NVRAM" now is the save folder
+  (`TDORT_OLD_NVRAM_ROOT=1`: as before); the arcade and puzzle levels can be chosen, the game
+  makes its save file and the story begins.
+* Cyberia then stopped at the first camera scene after the opening movie (black screen). Its
+  loader thread asks the sound thread to stop the music and waits for the reply on a signal
+  it never allocated; the reply goes to the camera player. On the console such a wait fails
+  at once (ILLEGALSIGNAL) and loading goes on; here it waited forever. WaitSignal now
+  returns that error for signals the task doesn't own, counting the low bits the console
+  would have given the task's audio cues (`TDORT_OLD_WAIT_ANY=1`: wait anyway). The briefing
+  and the camera scenes after it play.
 * The finer picture is now recorded one cel row at a time (8 bytes per pixel instead of a
   60-byte command per pixel), so the game's own thread spends much less time on it: Slam
   'n Jam's game play took 6.6 ms a frame at 2x and 8.8 at 4x here, against 7.8 and 10.2

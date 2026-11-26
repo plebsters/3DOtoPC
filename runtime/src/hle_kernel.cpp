@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <set>
 #include <filesystem>
 
 namespace tdort {
@@ -1148,6 +1149,34 @@ void Portfolio::install_kernel_swis() {
     });
     K(kWaitSignal, "WaitSignal", [this](Cpu*) {
         const uint32_t mask = arg(0);
+        // Waiting on a signal the task never allocated fails at once with
+        // ILLEGALSIGNAL, as in the kernel. Cyberia's scene loader asks the
+        // sound thread to stop the music and waits for the reply on a signal
+        // only the camera player owns (the reply goes there); on the console
+        // that wait returns straight away and loading goes on. Here it
+        // waited forever and the first camera scene stayed black.
+        // TDORT_OLD_WAIT_ANY=1: wait anyway, as before.
+        static const bool old_wait = std::getenv("TDORT_OLD_WAIT_ANY") != nullptr;
+        // The audio folio here gives cue signals from the top bits, where the
+        // console takes the lowest free ones when the cue is made; a task's
+        // first cues therefore own bits 8, 9, ... on the console, and code may
+        // wait on those directly (Cannon Fodder's music thread waits on 0x100).
+        // Count that many low free bits as allocated too.
+        uint32_t owned = cur().allocated;
+        if (!old_wait && (mask & ~owned)) {
+            int cues = 0;
+            for (const auto& [cue, task] : cue_signal_task_) if (task == cur().item) ++cues;
+            for (uint32_t b = kSigFirstUser; b < 31 && cues > 0; ++b)
+                if (!(owned & (1u << b))) { owned |= 1u << b; --cues; }
+        }
+        if (!old_wait && (mask & ~owned)) {
+            static std::set<std::string> told;
+            if (rt.cfg.trace || told.insert(cur().name).second)
+                rt.log("WaitSignal(%08X): signal not allocated by %s (%08X), returns at once", mask, cur().name.c_str(), cur().allocated);
+            wait_done();
+            c.r[0] = uint32_t(kErrIllegalSignal);
+            return;
+        }
         uint32_t got = cur().pending & mask;
         // An empty mask has nothing to wait for: return at once (Gex's player
         // thread polls this way). Signals not in the mask stay pending.

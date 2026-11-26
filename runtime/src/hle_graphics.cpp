@@ -278,8 +278,32 @@ void Portfolio::install_graphics() {
     };
     v[gvSetVDL]            = [this](Cpu*) {                // SetVDL(screen, vdl item) -> previous VDL
         const int32_t scr = int32_t(arg(0)), vdl = int32_t(arg(1));
+        // A screen comes with the VDL CreateScreenGroup made for it, and SetVDL
+        // returns that item the first time; handing it back restores the
+        // screen's own display (its bitmap, standard colours). Dragon Lore puts
+        // its movie VDLs back that way; with 0 returned it "restored" 0, the
+        // movie's colour table stayed and the menus were garbled.
+        // TDORT_OLD_SETVDL=1: return 0 for a screen without a custom VDL.
+        static const bool old_setvdl = std::getenv("TDORT_OLD_SETVDL") != nullptr;
         int32_t old = 0;
         if (auto o = screen_vdl_.find(scr); o != screen_vdl_.end()) old = o->second;
+        else if (!old_setvdl && item(scr) && item(scr)->kind == ItemKind::Screen) {
+            auto d = screen_default_vdl_.find(scr);
+            if (d == screen_default_vdl_.end()) {
+                HleItem& it = new_item(ItemKind::Generic, kSubsysGraphics, 6, 16, "VDL");
+                d = screen_default_vdl_.emplace(scr, it.num).first;
+            }
+            old = d->second;
+        }
+        if (!old_setvdl) {
+            auto d = screen_default_vdl_.find(scr);
+            if (d != screen_default_vdl_.end() && d->second == vdl) {
+                screen_vdl_.erase(scr);
+                screen_vdl_buffer_.erase(scr);
+                c.r[0] = uint32_t(old);
+                return;
+            }
+        }
         auto b = vdl_buffer_.find(vdl);
         if (b != vdl_buffer_.end() && b->second && guest_range_ok(b->second, 4)) {
             screen_vdl_[scr] = vdl;
