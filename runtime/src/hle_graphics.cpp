@@ -187,6 +187,18 @@ int32_t Portfolio::draw_cels(int32_t bitmap_item, uint32_t ccb) {
     if (t.height <= 0 || t.height > 960) t.height = 240;
     if (t.clip_w <= 0) t.clip_w = t.width;
     if (t.clip_h <= 0) t.clip_h = t.height;
+    // SetReadAddress: blended pixels (PIXC with the frame buffer as a source)
+    // read another buffer than the one drawn into. Pebble Beach draws each
+    // patch of its course into one buffer and then a shading polygon into the
+    // display buffer that reads the patch from the first: read from the
+    // display buffer instead, the shading landed on the sea image underneath
+    // and the fairways came out blue. TDORT_OLD_READ_ADDRESS=1: ignore it.
+    static const bool old_read = std::getenv("TDORT_OLD_READ_ADDRESS") != nullptr;
+    if (!old_read)
+        if (auto ra = read_address_.find(bitmap_item); ra != read_address_.end() && ra->second.first) {
+            t.read_buffer = ra->second.first;
+            t.read_width = int32_t(ra->second.second);
+        }
     if (std::getenv("TDORT_DEBUG_DISPLAY")) rt.log("DrawCels(bitmap %d -> buffer %08X, ccb %08X)", bitmap_item, t.buffer, ccb);
     static const bool cel_trace = std::getenv("TDORT_CEL_TRACE") != nullptr;
     if (cel_trace)
@@ -417,9 +429,7 @@ void Portfolio::install_graphics() {
         w32(ccbp + ccb::HDDY, uint32_t(int32_t(((y[2] - y[3] - y[1] + y[0]) << 20) / (w * h))));
     };
     // SetReadAddress(bitmap, buffer, width) / ResetReadAddress(bitmap): where the
-    // cel engine reads the background for blended pixels. The renderer blends
-    // against the bitmap it draws into, which is what these restore by default;
-    // the setting is kept so it reads back consistently.
+    // cel engine reads the background for blended pixels (see draw_cels).
     v[gvSetReadAddress] = [this](Cpu*) { read_address_[int32_t(arg(0))] = {arg(1), arg(2)}; c.r[0] = 0; };
     v[gvResetReadAddress] = [this](Cpu*) { read_address_.erase(int32_t(arg(0))); c.r[0] = 0; };
     // QueryGraphics(tag, ret) / QueryGraphicsList(tags): facts about the display.

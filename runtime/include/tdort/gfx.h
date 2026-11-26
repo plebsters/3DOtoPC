@@ -13,6 +13,10 @@ struct Cpu;
 struct CelTarget {
     uint32_t buffer = 0;
     int32_t  width = 320, height = 240;
+    // Where blended pixels read the "frame buffer" from (SetReadAddress); 0 =
+    // the buffer being drawn into.
+    uint32_t read_buffer = 0;
+    int32_t  read_width = 0;
     int32_t  clip_x = 0, clip_y = 0, clip_w = 320, clip_h = 240;
 };
 

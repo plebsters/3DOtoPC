@@ -456,13 +456,22 @@ uint16_t Gfx::process_state(const PixelState& p, uint16_t fb, uint32_t pixc, uin
 // ---- framebuffer access (LR form: line pairs share 32-bit words) -----------
 
 uint16_t Gfx::fb_read(const CelTarget& t, int x, int y) const {
-    uint32_t a = t.buffer + uint32_t(((y >> 1) * t.width + x) * 4 + ((y & 1) ? 2 : 0));
+    const uint32_t base = t.read_buffer ? t.read_buffer : t.buffer;
+    const int32_t w = t.read_buffer && t.read_width > 0 ? t.read_width : t.width;
+    uint32_t a = base + uint32_t(((y >> 1) * w + x) * 4 + ((y & 1) ? 2 : 0));
     return rd16(mem_, a);
 }
+
+// Debugging aid: TDORT_PIXEL_WHO=<hex address of a frame-buffer pixel> logs
+// each cel write to it (the cel's flags, PLUT pointer and the value).
+static uint32_t g_pixel_who = [] { const char* e = std::getenv("TDORT_PIXEL_WHO"); return e ? uint32_t(std::strtoul(e, nullptr, 16)) : 0u; }();
 
 void Gfx::fb_write(const CelTarget& t, int x, int y, uint16_t v) {
     uint32_t a = t.buffer + uint32_t(((y >> 1) * t.width + x) * 4 + ((y & 1) ? 2 : 0));
     if (a >= kRamEnd - 1) return;   // also catches addresses that wrap past 4 GB
+    if (g_pixel_who && a == g_pixel_who)
+        std::fprintf(stderr, "pixel %08X <- %04X by cel fl=%08X pre0=%08X pixc=%08X plut[0..3]=%04X %04X %04X %04X\n", a, v, r_.flags, r_.pre0,
+                     r_.pixc, r_.plut[0], r_.plut[1], r_.plut[2], r_.plut[3]);
     mem_.ram[a] = uint8_t(v >> 8);
     mem_.ram[a + 1] = uint8_t(v);
     if (cur_ >= 0) {
@@ -742,7 +751,11 @@ void Gfx::draw_one(const CelTarget& t, uint32_t src) {
 
 int Gfx::draw_cels(const CelTarget& t, uint32_t ccb) {
     int drawn = 0;
-    cur_ = scale_ > 1 ? shadow_for(t.buffer, t.width, t.height, true) : -1;
+    // Blending against another buffer (SetReadAddress) is drawn at 1x only:
+    // that buffer's hi-res copy isn't kept in step, and the destination's
+    // copy picks the change up from memory (sync) before it is shown.
+    const bool reads_other = t.read_buffer && t.read_buffer != t.buffer;
+    cur_ = scale_ > 1 && !reads_other ? shadow_for(t.buffer, t.width, t.height, true) : -1;
     if (cur_ >= 0) {
         sync(shadows_[size_t(cur_)]);
         Shadow& sh = shadows_[size_t(cur_)];
@@ -790,7 +803,14 @@ int Gfx::draw_cels(const CelTarget& t, uint32_t ccb) {
             std::fprintf(stderr, "cel %08X fl=%08X x=%08X y=%08X hdx=%08X hdy=%08X vdx=%08X vdy=%08X hddx=%08X hddy=%08X pixc=%08X pre0=%08X pre1=%08X src=%08X\n",
                          ccb, r_.flags, uint32_t(r_.xpos), uint32_t(r_.ypos), uint32_t(r_.hdx), uint32_t(r_.hdy), uint32_t(r_.vdx), uint32_t(r_.vdy),
                          uint32_t(r_.hddx), uint32_t(r_.hddy), r_.pixc, r_.pre0, r_.pre1, src);
-        if (!(r_.flags & kSkip)) { draw_one(t, src); ++drawn; }
+        if (cel_trace && (r_.flags & kLdPlut))
+            std::fprintf(stderr, "    plut %08X: %04X %04X %04X %04X %04X %04X %04X %04X\n", plut, r_.plut[0], r_.plut[1], r_.plut[2],
+                         r_.plut[3], r_.plut[4], r_.plut[5], r_.plut[6], r_.plut[7]);
+        if (!(r_.flags & kSkip)) {
+            const uint64_t before = pixels_written;
+            draw_one(t, src); ++drawn;
+            if (cel_trace) std::fprintf(stderr, "    wrote %llu pixels\n", (unsigned long long)(pixels_written - before));
+        }
         if (r_.flags & kLast) break;
         uint32_t nxt = (r_.flags & kNpAbs) ? next : next_field + 4 + next;
         if (!next && (r_.flags & kNpAbs)) break;

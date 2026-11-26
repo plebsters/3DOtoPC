@@ -24,9 +24,26 @@ void on_undefined(Cpu* c, uint32_t insn, uint32_t pc) {
     c->rt->log("undefined/coprocessor instruction %08X at %08X (treated as NOP)", insn, pc);
 }
 
+// TDORT_WRITE_WATCH (memory.h): one log line per guest store into the range.
+void Memory::watch_store(uint32_t addr, uint32_t v, int size, uint32_t pc) {
+    if (addr < watch_lo || addr >= watch_hi || ++watch_hits > 4000) return;
+    if (g_rt) g_rt->log("store %08X <- %0*X (%d byte%s) at pc %08X, lr %08X, frame %u", addr, size * 2, v, size,
+                        size > 1 ? "s" : "", pc, g_rt->cpu.r[14], g_rt->frames_watch());
+}
+
 Runtime::Runtime(RuntimeConfig config) : cfg(std::move(config)) {
     g_rt = this;
     cpu.mem = &mem;
+    if (const char* w = std::getenv("TDORT_WRITE_WATCH")) {
+        char* end = nullptr;
+        const uint32_t a = uint32_t(std::strtoul(w, &end, 16));
+        const uint32_t n = (end && *end == ',') ? uint32_t(std::strtoul(end + 1, nullptr, 16)) : 4;
+        if (a < kRamEnd && n) {
+            mem.watch_lo = a; mem.watch_hi = std::min<uint32_t>(kRamEnd, a + n);
+            for (uint32_t g = a >> kGranuleShift; g <= (mem.watch_hi - 1) >> kGranuleShift; ++g)
+                if (!mem.code_granule[g]) mem.code_granule[g] = 2;
+        }
+    }
     cpu.rt = this;
     gfx = std::make_unique<Gfx>(mem);
     audio = std::make_unique<Audio>(mem);
@@ -498,6 +515,9 @@ int Runtime::run(Platform* platform) {
         // Debugging aid: TDORT_TRACE_FROM=<frame> turns on --trace at that frame
         // (a full trace of a long session is too big to keep).
         if (static const char* tf = std::getenv("TDORT_TRACE_FROM"); tf && frames_ + 1 == uint32_t(std::strtoul(tf, nullptr, 10))) cfg.trace = true;
+        if (mem.watch_hi)   // a save-state load restores the code marks: put the watch back
+            for (uint32_t g = mem.watch_lo >> kGranuleShift; g <= (mem.watch_hi - 1) >> kGranuleShift; ++g)
+                if (!mem.code_granule[g]) mem.code_granule[g] = 2;
         if (os && ++frames_ % 120 == 0 && (frames_ <= 120 * 30 || std::getenv("TDORT_AUDIO_STATUS")))
             log("%s", os->status_line(frames_).c_str());
         const uint64_t frame_start = cpu.cycles;

@@ -58,7 +58,13 @@ struct Memory {
         for (uint32_t g = addr >> kGranuleShift; g <= (end - 1) >> kGranuleShift; ++g)
             if (code_granule[g] && !granule_dirty[g]) { granule_dirty[g] = 1; dirty_by[g] = 0xFFFFFFFFu; dirty_call[g] = host_call; }
     }
-    void mark_cpu_write(uint32_t g, uint32_t pc) {
+    // Debugging aid: TDORT_WRITE_WATCH=<hex addr>[,<hex len>] marks those
+    // granules (code_granule = 2) so guest stores there take the slow path,
+    // and logs each store into the range with its pc (exact under --interp).
+    uint32_t watch_lo = 0, watch_hi = 0, watch_hits = 0;
+    void watch_store(uint32_t addr, uint32_t v, int size, uint32_t pc);
+    void mark_cpu_write(uint32_t g, uint32_t pc, uint32_t addr = 0, uint32_t v = 0, int size = 0) {
+        if (code_granule[g] == 2) { if (size) watch_store(addr, v, size, pc); return; }
         if (!granule_dirty[g]) { granule_dirty[g] = 1; dirty_by[g] = pc; dirty_call[g] = nullptr; }
     }
     // Host-side bulk copy into guest memory (file loads, DMA). Invalidates code.
@@ -95,7 +101,7 @@ TDORT_FORCEINLINE void mem_w32(Cpu* c, uint32_t addr, uint32_t v) {
     if (addr < kRamEnd) {
         store_be32(&m->ram[addr], v);
         uint32_t g = addr >> kGranuleShift;
-        if (m->code_granule[g]) m->mark_cpu_write(g, c->r[15]);
+        if (m->code_granule[g]) m->mark_cpu_write(g, c->r[15], addr, v, 4);
         return;
     }
     if (m->io_write) m->io_write(m->io_user, addr, v, 4);
@@ -105,7 +111,7 @@ TDORT_FORCEINLINE void mem_w8(Cpu* c, uint32_t addr, uint8_t v) {
     if (addr < kRamEnd) {
         m->ram[addr] = v;
         uint32_t g = addr >> kGranuleShift;
-        if (m->code_granule[g]) m->mark_cpu_write(g, c->r[15]);
+        if (m->code_granule[g]) m->mark_cpu_write(g, c->r[15], addr, v, 1);
         return;
     }
     if (m->io_write) m->io_write(m->io_user, addr, v, 1);

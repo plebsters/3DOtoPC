@@ -452,6 +452,9 @@ Environment variables:
 | `TDORT_OLD_DETACH_LINK=1` | deleting an attachment that has played to its end does not start the attachment linked after it |
 | `TDORT_LOG_CHAIN=1` | logs sample attachments that end with nothing linked, or are deleted while playing (debugging) |
 | `TDORT_OLD_CEL_SRC_ALIGN=1` | cels read their source data from the exact address, even when it isn't word-aligned |
+| `TDORT_OLD_READ_ADDRESS=1` | `SetReadAddress` is ignored: blended cel pixels read the buffer being drawn into |
+| `TDORT_WRITE_WATCH=<hex addr>[,<hex len>]` | logs every guest store into that range with its pc (exact with `--interp`; debugging) |
+| `TDORT_PIXEL_WHO=<hex addr>` | logs every cel write to that frame-buffer address, with the cel's flags and PLUT (debugging) |
 | `TDORT_OLD_FOLIO_INFO=1` | `GetAudioFolioInfo` fills in nothing (sample rate and master volume stay 0) |
 | `TDORT_OLD_FSSTAT=1` | the file system query for size and free space (FSSTAT) is not answered |
 | `TDORT_OLD_DELETE_ANY=1` | any task may delete any item (the console allows only the owner) |
@@ -671,6 +674,14 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* Pebble Beach Golf Links: the course (fairways, rough, bunkers) was drawn in shades of
+  blue. Each patch of the course is drawn into a spare buffer, then a shading polygon is
+  drawn into the display buffer with SetReadAddress pointing at the spare one, so the
+  polygon's blend reads the patch and writes the shaded result. The runtime kept the
+  SetReadAddress setting but blended against the display buffer, where the hole's sea
+  image lay, so the shading landed on the water. Blends now read the buffer
+  SetReadAddress names (`TDORT_OLD_READ_ADDRESS=1`: as before); such draws are made at 1x.
+  The flyover and the shot screens show green fairways, bunkers and water.
 * The Lost Files of Sherlock Holmes: its opening video and scenes were rows of streaks.
   It draws pictures as hundreds of small packed tiles whose source pointers are often only
   2-byte aligned; the cel engine fetches whole 32-bit words and ignores the low two

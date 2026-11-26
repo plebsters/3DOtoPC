@@ -129,6 +129,9 @@ private:
     bool repeat_call(uint32_t site, uint32_t a0, uint32_t a1);
     uint64_t recent_calls_[16] = {};
     uint32_t recent_pos_ = 0, frames_ = 0;
+public:
+    uint32_t frames_watch() const { return frames_; }   // TDORT_WRITE_WATCH log
+private:
     void crash(const char* reason, uint32_t pc);
 
     std::vector<int32_t> lookup_;            // guest word index -> recomp table index, -1 = none
