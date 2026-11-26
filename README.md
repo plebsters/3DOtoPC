@@ -451,6 +451,7 @@ Environment variables:
 | `TDORT_OLD_SETVDL=1` | `SetVDL` returns 0 for a screen that has no custom VDL yet (instead of the item for its own VDL) |
 | `TDORT_OLD_DETACH_LINK=1` | deleting an attachment that has played to its end does not start the attachment linked after it |
 | `TDORT_LOG_CHAIN=1` | logs sample attachments that end with nothing linked, or are deleted while playing (debugging) |
+| `TDORT_OLD_CEL_SRC_ALIGN=1` | cels read their source data from the exact address, even when it isn't word-aligned |
 | `TDORT_OLD_FOLIO_INFO=1` | `GetAudioFolioInfo` fills in nothing (sample rate and master volume stay 0) |
 | `TDORT_OLD_FSSTAT=1` | the file system query for size and free space (FSSTAT) is not answered |
 | `TDORT_OLD_DELETE_ANY=1` | any task may delete any item (the console allows only the owner) |
@@ -670,6 +671,12 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* The Lost Files of Sherlock Holmes: its opening video and scenes were rows of streaks.
+  It draws pictures as hundreds of small packed tiles whose source pointers are often only
+  2-byte aligned; the cel engine fetches whole 32-bit words and ignores the low two
+  address bits, and the runtime read from the exact byte, so every row was shifted. Cel
+  source addresses are now rounded down to a word (`TDORT_OLD_CEL_SRC_ALIGN=1`: as before).
+  The title scene, the prologue and the first scenes at Baker Street draw correctly.
 * Wing Commander III ignored the pad from its first interactive screen (the hangar): the
   cursor never moved. Its event thread waits on every signal it owns, read from its own
   task structure (t_AllocatedSigs), and the runtime left that at 0xFF when the thread made

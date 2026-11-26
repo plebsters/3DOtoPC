@@ -640,6 +640,13 @@ void Gfx::fill_quad(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], 
 }
 
 void Gfx::draw_one(const CelTarget& t, uint32_t src) {
+    // The cel engine fetches source data a 32-bit word at a time and ignores
+    // the low two bits of the address. The Lost Files of Sherlock Holmes
+    // draws its movies as small packed tiles whose pointers are often only
+    // 2-byte aligned; read from the exact byte, every row was shifted and the
+    // pictures turned to streaks. TDORT_OLD_CEL_SRC_ALIGN=1: use the exact address.
+    static const bool old_align = std::getenv("TDORT_OLD_CEL_SRC_ALIGN") != nullptr;
+    if (!old_align) src &= ~3u;
     const uint32_t flags = r_.flags;
     const bool packed = flags & kPacked;
     if (!(flags & kCcbPre)) {           // preamble lives at the start of the source data
