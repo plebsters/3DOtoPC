@@ -1564,6 +1564,11 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
                 for (uint32_t b = kSigFirstUser; b < 31; ++b)
                     if (!(cur().allocated & (1u << b))) { sig = 1u << b; break; }
                 cur().allocated |= sig;
+                // The task's own record of its signals follows: Wing Commander
+                // III's event thread waits on t_AllocatedSigs (all its signals),
+                // which still said 0xFF, so its port's signal never woke it and
+                // the pad did nothing from the first interactive screen on.
+                w32(cur().addr + task::AllocatedSigs, cur().allocated);
             }
             HleItem& p = new_item(ItemKind::MsgPort, kSubsysKernel, kNodeMsgPort, std::max(size, msgport::Size), name);
             p.signal = sig;

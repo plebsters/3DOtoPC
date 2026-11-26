@@ -670,6 +670,24 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* Wing Commander III ignored the pad from its first interactive screen (the hangar): the
+  cursor never moved. Its event thread waits on every signal it owns, read from its own
+  task structure (t_AllocatedSigs), and the runtime left that at 0xFF when the thread made
+  its message port, so the port's signal (0x100) never woke it. Allocating a port's or an
+  audio cue's signal now updates the task structure too. The hangar, the ship's rooms and
+  their hotspots work.
+* Japanese discs with Shift-JIS file names failed to convert ("No mapping for the Unicode
+  character exists in the target multi-byte code page", seen with The Doraemons demo):
+  Windows can't make a file whose name isn't valid UTF-8. In such names every byte from
+  0x80 up is now stored as %XX, like the characters Windows refuses, and the runtime finds
+  the files under their original names.
+* Batch conversion: a .cue and the .iso it points to, both picked, are converted once
+  instead of once plus an "already converted" skip; different discs with the same title
+  (a sampler's JP and two US releases, say) each get their own folder, named after the
+  whole file name, instead of all but the first being skipped; and each game's exe and
+  window are named after the game, not the volume label "CD-ROM" most discs carry (with no
+  name given, a "CD-ROM" label falls back to the disc file's name). The "CMAKE_C_COMPILER
+  not used" CMake warning is gone.
 * Wing Commander III's movies went silent after the first minute (and most of the intro
   had no sound). Its streamer chains small sound buffers with LinkAttachments, waits for
   WhereAttachment to reach a buffer's end, then detaches it at once. The runtime noticed

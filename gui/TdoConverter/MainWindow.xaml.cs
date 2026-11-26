@@ -180,11 +180,15 @@ public partial class MainWindow : Window
             Multiselect = true,
         };
         if (dlg.ShowDialog(this) != true || dlg.FileNames.Length == 0) return;
-        // A .bin listed by a .cue that is also chosen is the same disc.
+        // A .bin or .iso with the same name as a .cue that is also chosen is the
+        // same disc (the cue sheet points at it): it is converted once, not
+        // converted and then reported as "already converted".
         var picked = new List<string>(dlg.FileNames);
-        picked.RemoveAll(f => f.EndsWith(".bin", StringComparison.OrdinalIgnoreCase) &&
+        picked.RemoveAll(f => (f.EndsWith(".bin", StringComparison.OrdinalIgnoreCase) ||
+                               f.EndsWith(".iso", StringComparison.OrdinalIgnoreCase)) &&
                               picked.Exists(c => c.EndsWith(".cue", StringComparison.OrdinalIgnoreCase) &&
-                                                 Path.ChangeExtension(c, null) == Path.ChangeExtension(f, null)));
+                                                 string.Equals(Path.ChangeExtension(c, null), Path.ChangeExtension(f, null),
+                                                               StringComparison.OrdinalIgnoreCase)));
         // Discs of one game are converted together, once, from disc 1.
         var jobs = new List<(string first, List<string> extras, bool isSet)>();
         foreach (string f in picked)
@@ -193,6 +197,20 @@ public partial class MainWindow : Window
             if (!jobs.Exists(j => string.Equals(j.first, set.first, StringComparison.OrdinalIgnoreCase))) jobs.Add(set);
         }
         jobs.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(Path.GetFileName(a.first), Path.GetFileName(b.first)));
+
+        // Folder (and exe) names: the title before the first "(" or "[". Different
+        // discs with the same title (a sampler's JP and US releases, say) keep
+        // their whole file name instead, so each gets its own folder rather
+        // than all but the first being skipped as "already converted".
+        var titles = new List<string>();
+        foreach (var j in jobs) titles.Add(GameFolderName(j.first, !j.isSet));
+        for (int i = 0; i < jobs.Count; ++i)
+        {
+            if (titles.FindAll(t => string.Equals(t, titles[i], StringComparison.OrdinalIgnoreCase)).Count < 2) continue;
+            string full = Path.GetFileNameWithoutExtension(jobs[i].first).Trim();
+            foreach (char c in Path.GetInvalidFileNameChars()) full = full.Replace(c, '_');
+            titles[i] = full;
+        }
 
         string games = GamesFolder();
         var results = new List<string>();
@@ -206,7 +224,7 @@ public partial class MainWindow : Window
             for (int i = 0; i < jobs.Count; ++i)
             {
                 if (_batchStop) { results.Add("Stopped before: " + Path.GetFileName(jobs[i].first)); break; }
-                string disc = jobs[i].first, title = GameFolderName(disc, !jobs[i].isSet), outDir = Path.Combine(games, title);
+                string disc = jobs[i].first, title = titles[i], outDir = Path.Combine(games, title);
                 string discs = jobs[i].extras.Count > 0 ? $", {1 + jobs[i].extras.Count} discs" : "";
                 AppendLog(0, $"===== [{i + 1}/{jobs.Count}] {title}  ({Path.GetFileName(disc)}{discs})");
                 StageText.Text = _batchLabel = $"Batch {i + 1} of {jobs.Count}: {title}";
@@ -216,7 +234,9 @@ public partial class MainWindow : Window
                     results.Add($"Skipped   {title} (already converted)"); ++skipped; continue;
                 }
                 DiscBox.Text = disc; OutBox.Text = _suggestedOut = outDir;
-                var req = new ConversionRequest(disc, outDir, null, null, null, BuildCheck.IsChecked == true,
+                // The game's title names the exe and window (the disc's volume
+                // label is "CD-ROM" on most discs).
+                var req = new ConversionRequest(disc, outDir, title, null, null, BuildCheck.IsChecked == true,
                                                 ScanCheck.IsChecked == true, ReleaseCheck.IsChecked == true)
                 { ExtraDiscs = jobs[i].extras };
                 int rc;

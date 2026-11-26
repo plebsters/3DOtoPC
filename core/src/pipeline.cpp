@@ -271,7 +271,17 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
     // 5. Emit
     cx.progress(TDO_STAGE_EMIT, 0);
     tdo::EmitOptions eopt;
-    eopt.game_name = (opt.game_name && *opt.game_name) ? opt.game_name : (volume_label.empty() ? "3DO Game" : volume_label);
+    // With no name given: the disc's volume label, unless it is the generic
+    // "CD-ROM" most discs carry; then the disc file's name up to its first
+    // "(" or "[" (No-Intro style tags).
+    std::string label = volume_label;
+    if (label.empty() || ieq(label, "CD-ROM")) {
+        std::string stem = fs::u8path(opt.disc_path).stem().u8string();
+        if (size_t cut = stem.find_first_of("(["); cut != std::string::npos && cut > 0) stem.erase(cut);
+        while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+        if (!stem.empty()) label = stem;
+    }
+    eopt.game_name = (opt.game_name && *opt.game_name) ? opt.game_name : (label.empty() ? "3DO Game" : label);
     // 5a. Other programs on the disc(s): anything else in AIF format (movie
     // players, front ends, game parts loaded with LoadProgram / LoadCode).
     // Each is translated too and runs natively wherever the game loads it.

@@ -80,6 +80,7 @@ Toolchain detect_toolchain() {
             "-DCMAKE_C_COMPILER=" + quote(b_clang.generic_u8string()),
             "-DCMAKE_CXX_COMPILER=" + quote(b_clang.generic_u8string()),
             "-DCMAKE_LINKER=" + quote(b_lld.generic_u8string()),
+            "--no-warn-unused-cli",   // the projects are C++ only: no "CMAKE_C_COMPILER not used" warning
         };
         // The Windows SDK headers/libs are still required; xwin-style SDK
         // copies can be placed in toolchain/winsdk and passed via a toolchain file.
@@ -132,7 +133,7 @@ Toolchain detect_toolchain() {
                     t.description = "Visual Studio (" + install + ")";
                     t.generator = "Ninja";
                     t.configure_args = {"-DCMAKE_MAKE_PROGRAM=" + quote(ninja.generic_u8string()),
-                                        "-DCMAKE_C_COMPILER=cl", "-DCMAKE_CXX_COMPILER=cl"};
+                                        "-DCMAKE_C_COMPILER=cl", "-DCMAKE_CXX_COMPILER=cl", "--no-warn-unused-cli"};
                 } else {
                     // NMake ships with the C++ tools, so it works whenever cl does.
                     t.description = "Visual Studio, NMake (" + install + ")";

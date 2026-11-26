@@ -428,7 +428,7 @@ void Portfolio::install_audio(std::map<int32_t, HleFn>& av) {
             HleTask* t = task_by_item(task);
             sig = 0;
             if (t) for (uint32_t b = 30; b >= kSigFirstUser; --b) if (!(t->allocated & (1u << b))) { sig = 1u << b; break; }
-            if (t) t->allocated |= sig;
+            if (t) { t->allocated |= sig; w32(t->addr + task::AllocatedSigs, t->allocated); }
             cue_signals_[cue] = sig;
             if (sig) cue_signal_task_[cue] = task;
         }
