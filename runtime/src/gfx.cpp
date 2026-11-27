@@ -2,6 +2,7 @@
 // CEL engine (data unpacker, pixel decoder, pixel processor, projector).
 #include "tdort/gfx.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -83,6 +84,19 @@ const uint32_t* Gfx::scan_out() {
     scale_up(lrform ? shadow_for(display_addr_, kWidth, lines, false) : -1, lines);
     return frame_.data();
 }
+
+// One row of a cel, as the corner engine walked it: each pixel's corners are
+// affine in its column, so the row is stored once and its pixels as 8 bytes
+// each; the workers rebuild every pixel's quad exactly as fill_quad saw it.
+struct HiRow {
+    int64_t ox, oy, hx, hy, nox, noy, nhx, nhy;   // corner engine, 12.20
+    int32_t gx, gy;                       // clip origin, 16.16
+    int16_t clip_x, clip_y, clip_w, clip_h;
+    uint32_t pixc, flags;
+    uint32_t first, count;                // pixels in HiPool::pix
+    uint8_t scale;
+};
+struct HiPix { uint16_t col, color; uint8_t bits, amv_r, amv_g, amv_b; };   // bits: 1 pmode, 2 msb
 
 // ---- hi-res shadows -----------------------------------------------------------
 
@@ -219,7 +233,7 @@ void Gfx::note_write(uint32_t addr, uint32_t len) {
 // ---- drawing the shadows on worker threads --------------------------------
 // Each quad for a shadow becomes a command; commands are handed to worker
 // threads in batches (at the end of each DrawCels), and each worker draws the
-// rows of every batch that belong to it (8-row stripes, dealt out in turn),
+// rows of every batch that belong to it (stripes of 8 game lines, dealt out in turn),
 // in order. So the finer picture is drawn on other cores while the game runs
 // on, and the result is the same as drawing it here. The game's thread waits
 // for them only before it reads or changes a shadow (scan-out, copying pixels
@@ -234,18 +248,6 @@ struct HiCmd {
     uint32_t pixc, flags;
 };
 
-// One row of a cel, as the corner engine walked it: each pixel's corners are
-// affine in its column, so the row is stored once and its pixels as 8 bytes
-// each; the workers rebuild every pixel's quad exactly as fill_quad saw it.
-struct HiRow {
-    int64_t ox, oy, hx, hy, nox, noy, nhx, nhy;   // corner engine, 12.20
-    int32_t gx, gy;                       // clip origin, 16.16
-    int16_t clip_x, clip_y, clip_w, clip_h;
-    uint32_t pixc, flags;
-    uint32_t first, count;                // pixels in HiPool::pix
-    uint8_t scale;
-};
-struct HiPix { uint16_t col, color; uint8_t bits, amv_r, amv_g, amv_b; };   // bits: 1 pmode, 2 msb
 
 static void hi_raster(const HiCmd& c, uint16_t* hi, int W, int H, int w, int T) {
     const int s = c.scale;
@@ -326,42 +328,219 @@ static void hi_raster(const HiCmd& c, uint16_t* hi, int W, int H, int w, int T) 
     }
 }
 
-static void hi_raster_row(const HiRow& r, const HiPix* pix, uint16_t* hi, int W, int H, int w, int T) {
+// The pixel processor set up for one cel row and P-mode: the control
+// half-word's table (or normal mode, where the result is the cel colour).
+// A pixel's result for a frame buffer value is then three table reads.
+struct RowBlend {
+    const uint8_t* t = nullptr;
+    bool direct = false, fix_black = false, slow = false, old_msb = false;
+};
+static void make_row_blend(RowBlend& b, uint32_t ctl, uint32_t flags);
+static inline uint16_t row_blend(const RowBlend& b, const Gfx::PixelState& ps, uint16_t fb, uint32_t pixc, uint32_t flags) {
+    if (b.slow) return Gfx::process_state(ps, fb, pixc, flags);
+    uint16_t out;
+    if (b.direct) out = ps.color;
+    else {
+        const uint8_t* t = b.t;
+        out = uint16_t((uint32_t(t[(uint32_t(ps.amv_r < 8 ? ps.amv_r : 8) * 32 + ((ps.color >> 10) & 31)) * 32 + ((fb >> 10) & 31)]) << 10)
+                     | (uint32_t(t[(uint32_t(ps.amv_g < 8 ? ps.amv_g : 8) * 32 + ((ps.color >> 5) & 31)) * 32 + ((fb >> 5) & 31)]) << 5)
+                     | t[(uint32_t(ps.amv_b < 8 ? ps.amv_b : 8) * 32 + (ps.color & 31)) * 32 + (fb & 31)]);
+    }
+    if (out == 0 && b.fix_black) out = 0x0400;
+    if (ps.msb && !b.old_msb) out |= 0x8000;
+    return out;
+}
+static inline int64_t min4(const int64_t* v) { int64_t a = v[0] < v[1] ? v[0] : v[1], b = v[2] < v[3] ? v[2] : v[3]; return a < b ? a : b; }
+static inline int64_t max4(const int64_t* v) { int64_t a = v[0] > v[1] ? v[0] : v[1], b = v[2] > v[3] ? v[2] : v[3]; return a > b ? a : b; }
+
+// The stripe height for a batch: workers take turns by stripes of rows. Big
+// pixel quads (magnified textures) want tall stripes (8 game lines, 32 rows at
+// 4x), so few quads straddle two workers and get set up twice; tiny ones (far
+// textures, many texels to a pixel) rarely straddle, and short 8-row stripes
+// share a crowded band of the screen among more workers. Judged from a sample
+// of the batch's rows: the height of a pixel's quad, in shadow rows.
+static int hi_stripe(const HiRow* rows, size_t n, int scale) {
+    if (!n || scale <= 1) return 8;
+    double sum = 0; int cnt = 0;
+    const size_t step = std::max<size_t>(1, n / 64);
+    for (size_t i = 0; i < n; i += step, ++cnt) {
+        const HiRow& r = rows[i];
+        const double down = std::fabs(double(r.noy - r.oy)), across = std::fabs(double(r.hy));
+        sum += (down + across) * scale / 1048576.0;
+    }
+    return sum / cnt >= 1.0 ? 8 * scale : 8;
+}
+
+// Draws one recorded cel row into a shadow: every pixel's quad, scaled,
+// filled where pixel centres are inside all four edges (as fill_quad does at
+// 1x). Worker w of T draws only its own stripes. Everything that is the
+// same for the whole row (clip window, pixel processor modes) is worked out
+// once per row.
+static void hi_raster_row(const HiRow& r, const HiPix* pix, uint16_t* hi, int W, int H, int w, int T, int stripe) {
     if (!r.count) return;
+    const int s = r.scale;
+    // Workers take turns by stripes of `stripe` rows (see hi_stripe).
+    // Per row of the shadow: which worker owns it, and where the next stripe starts.
+    thread_local std::vector<uint8_t> owner; thread_local std::vector<int32_t> next_start;
+    thread_local int t_H = -1, t_stripe = -1, t_T = -1;
+    if (T > 1 && (t_H != H || t_stripe != stripe || t_T != T)) {
+        owner.resize(size_t(H) + 1); next_start.resize(size_t(H) + 1);
+        for (int y = 0; y <= H; ++y) { owner[size_t(y)] = uint8_t((y / stripe) % T); next_start[size_t(y)] = (y / stripe + 1) * stripe; }
+        t_H = H; t_stripe = stripe; t_T = T;
+    }
     // Rows this cel row can touch: its outer corners bound every pixel's quad.
     if (T > 1) {
         const int64_t c0 = pix[0].col, c1 = int64_t(pix[r.count - 1].col) + 1;
         const int64_t ys[4] = {r.oy + c0 * r.hy, r.oy + c1 * r.hy, r.noy + c0 * r.nhy, r.noy + c1 * r.nhy};
-        const int64_t lo = (int64_t(r.gy) + (std::min({ys[0], ys[1], ys[2], ys[3]}) >> 4)) * r.scale;
-        const int64_t hi_ = (int64_t(r.gy) + (std::max({ys[0], ys[1], ys[2], ys[3]}) >> 4)) * r.scale;
+        const int64_t lo = (int64_t(r.gy) + (std::min({ys[0], ys[1], ys[2], ys[3]}) >> 4)) * s;
+        const int64_t hi_ = (int64_t(r.gy) + (std::max({ys[0], ys[1], ys[2], ys[3]}) >> 4)) * s;
         const int64_t y0 = std::max<int64_t>(0, (lo >> 16) - 1), y1 = std::min<int64_t>(H, (hi_ >> 16) + 2);
         bool any = false;
-        for (int64_t yy = y0; yy < y1 && !any; yy = (yy | 7) + 1) any = ((yy >> 3) % T) == w;
+        for (int64_t yy = y0; yy < y1 && !any; yy = next_start[size_t(yy)]) any = owner[size_t(yy)] == w;
         if (!any) return;
     }
-    HiCmd c;
-    c.clip_x = r.clip_x; c.clip_y = r.clip_y; c.clip_w = r.clip_w; c.clip_h = r.clip_h;
-    c.scale = r.scale; c.pixc = r.pixc; c.flags = r.flags;
+    const int cx0 = std::max(0, r.clip_x * s), cy0 = std::max(0, r.clip_y * s);
+    const int cx1 = std::min(W, (r.clip_x + r.clip_w) * s), cy1 = std::min(H, (r.clip_y + r.clip_h) * s);
+    if (cx0 >= cx1 || cy0 >= cy1) return;
+    const bool acw = r.flags & 0x00040000u, accw = r.flags & 0x00020000u;
+    if (!acw && !accw) return;
+    bool needs_fb[2];
+    RowBlend rb[2];
+    for (int m = 0; m < 2; ++m) {
+        const uint32_t ctl = m ? (r.pixc >> 16) & 0xFFFF : r.pixc & 0xFFFF;
+        needs_fb[m] = (ctl & 0x8000) || ((ctl >> 6) & 3) == 2;
+        make_row_blend(rb[m], ctl, r.flags);
+    }
+    // Rows (of the shadow) per column when every corner moves the same way;
+    // rate is the fastest such movement (rows per column, signed).
+    const bool mono = T > 1 && ((r.hy > 0 && r.nhy > 0) || (r.hy < 0 && r.nhy < 0));
+    const double rate = !mono ? 0.0 : (r.hy > 0 ? double(std::max(r.hy, r.nhy)) : double(std::min(r.hy, r.nhy))) * s / 1048576.0;
+    const int64_t cx0f = int64_t(cx0) << 16, cx1f = int64_t(cx1) << 16, cy0f_ = int64_t(cy0) << 16, cy1f = int64_t(cy1) << 16;
     for (uint32_t i = 0; i < r.count; ++i) {
         const HiPix& p = pix[i];
         const int64_t c0 = p.col, c1 = int64_t(p.col) + 1;
-        c.x[0] = r.gx + int32_t((r.ox + c0 * r.hx) >> 4);   c.x[1] = r.gx + int32_t((r.ox + c1 * r.hx) >> 4);
-        c.x[2] = r.gx + int32_t((r.nox + c1 * r.nhx) >> 4); c.x[3] = r.gx + int32_t((r.nox + c0 * r.nhx) >> 4);
-        c.y[0] = r.gy + int32_t((r.oy + c0 * r.hy) >> 4);   c.y[1] = r.gy + int32_t((r.oy + c1 * r.hy) >> 4);
-        c.y[2] = r.gy + int32_t((r.noy + c1 * r.nhy) >> 4); c.y[3] = r.gy + int32_t((r.noy + c0 * r.nhy) >> 4);
+        // The rows first: a quad in another worker's stripes is dropped
+        // before the rest is worked out.
+        int32_t qx[4], qy[4];
+        qy[0] = r.gy + int32_t((r.oy + c0 * r.hy) >> 4);   qy[1] = r.gy + int32_t((r.oy + c1 * r.hy) >> 4);
+        qy[2] = r.gy + int32_t((r.noy + c1 * r.nhy) >> 4); qy[3] = r.gy + int32_t((r.noy + c0 * r.nhy) >> 4);
+        int64_t X[4], Y[4];
+        for (int k = 0; k < 4; ++k) Y[k] = int64_t(qy[k]) * s;
+        const int64_t miny = min4(Y), maxy = max4(Y);
+        if (maxy < cy0f_ - 65536 || miny >= cy1f) continue;
+        const int ymin = int(std::clamp<int64_t>(miny >> 16, cy0, cy1)), ymax = int(std::clamp<int64_t>((maxy >> 16) + 1, cy0, cy1));
+        if (ymin >= ymax) continue;
+        if (T > 1) {                      // none of this worker's stripes in [ymin, ymax)?
+            bool any = false;
+            for (int yy = ymin; yy < ymax && !any; yy = next_start[size_t(yy)]) any = owner[size_t(yy)] == w;
+            if (!any) {
+                // A row that runs steadily down (or up) the screen, like a wall
+                // drawn as tall columns, crosses every stripe: skip the columns
+                // that can't reach this worker's next stripe instead of
+                // working each one out. The bound is conservative (2 rows of
+                // margin), so only quads that draw nothing here are skipped.
+                if (mono) {
+                    double k = 0;
+                    if (rate > 0) {       // moving down: the next row of ours below
+                        int y = ymax;
+                        while (y < H && owner[size_t(y)] != w) y = next_start[size_t(y)];
+                        if (y >= H) break;   // nothing of ours further down this row
+                        k = (double(y) - 2.0 - double(maxy) / 65536.0) / rate;
+                    } else {              // moving up: the last row of ours above
+                        int y = ymin - 1;
+                        while (y >= 0 && owner[size_t(y)] != w) y = (y / stripe) * stripe - 1;
+                        if (y < 0) break;
+                        k = (double(miny) / 65536.0 - double(y + 1) - 2.0) / -rate;
+                    }
+                    if (k >= 2.0) {
+                        const int64_t target = int64_t(p.col) + int64_t(k);
+                        while (i + 1 < r.count && int64_t(pix[i + 1].col) < target) ++i;
+                    }
+                }
+                continue;
+            }
+        }
+        qx[0] = r.gx + int32_t((r.ox + c0 * r.hx) >> 4);   qx[1] = r.gx + int32_t((r.ox + c1 * r.hx) >> 4);
+        qx[2] = r.gx + int32_t((r.nox + c1 * r.nhx) >> 4); qx[3] = r.gx + int32_t((r.nox + c0 * r.nhx) >> 4);
         // fill_quad's face culling
-        const int64_t area = int64_t(c.x[1] - c.x[0]) * (c.y[2] - c.y[0]) - int64_t(c.y[1] - c.y[0]) * (c.x[2] - c.x[0]);
-        if (area == 0) continue;
-        if (area > 0 && !(r.flags & 0x00040000u)) continue;   // kAcw
-        if (area < 0 && !(r.flags & 0x00020000u)) continue;   // kAccw
-        c.px.color = p.color; c.px.pmode = p.bits & 1; c.px.msb = (p.bits & 2) != 0;
-        c.px.amv_r = p.amv_r; c.px.amv_g = p.amv_g; c.px.amv_b = p.amv_b;
-        hi_raster(c, hi, W, H, w, T);
+        const int64_t area1 = int64_t(qx[1] - qx[0]) * (qy[2] - qy[0]) - int64_t(qy[1] - qy[0]) * (qx[2] - qx[0]);
+        if (area1 == 0 || (area1 > 0 && !acw) || (area1 < 0 && !accw)) continue;
+        for (int k = 0; k < 4; ++k) X[k] = int64_t(qx[k]) * s;
+        const int64_t minx = min4(X), maxx = max4(X);
+        // Entirely outside the clip window: nothing to draw (the bounds below would be empty).
+        if (maxx < cx0f - 65536 || minx >= cx1f) continue;
+        // No pixel centre (n + 0.5) inside the bounding box across or down: a
+        // quad smaller than a pixel that falls between centres draws nothing
+        // (far walls shrink many texels into each pixel).
+        if (((maxy - 0x8000) >> 16) < ((miny - 0x8000 + 0xFFFF) >> 16) || ((maxx - 0x8000) >> 16) < ((minx - 0x8000 + 0xFFFF) >> 16)) continue;
+        const int pm = p.bits & 1;
+        Gfx::PixelState ps{p.color, uint8_t(pm), p.amv_r, p.amv_g, p.amv_b, (p.bits & 2) != 0};
+        const bool nfb = needs_fb[pm];
+        const RowBlend& b = rb[pm];
+        const uint16_t flat = nfb ? 0 : row_blend(b, ps, 0, r.pixc, r.flags);
+        auto qb = [&](uint16_t fb) { return row_blend(b, ps, fb, r.pixc, r.flags); };
+        auto row_ok = [&](int yy) { return T <= 1 || owner[size_t(yy)] == w; };
+        if (Y[0] == Y[1] && Y[2] == Y[3] && X[0] == X[3] && X[1] == X[2]) {
+            const int64_t xa = std::min(X[0], X[1]), xb = std::max(X[0], X[1]);
+            const int64_t ya = std::min(Y[0], Y[3]), yb = std::max(Y[0], Y[3]);
+            const int px0 = int(std::clamp<int64_t>((xa + 0x7FFF) >> 16, cx0, cx1)), px1 = int(std::clamp<int64_t>((xb + 0x7FFF) >> 16, cx0, cx1));
+            const int py0 = int(std::clamp<int64_t>((ya + 0x7FFF) >> 16, cy0, cy1)), py1 = int(std::clamp<int64_t>((yb + 0x7FFF) >> 16, cy0, cy1));
+            for (int yy = py0; yy < py1; ++yy) {
+                if (!row_ok(yy)) continue;
+                uint16_t* d = hi + size_t(yy) * W;
+                if (nfb) for (int xx = px0; xx < px1; ++xx) d[xx] = qb(d[xx]);
+                else for (int xx = px0; xx < px1; ++xx) d[xx] = flat;
+            }
+            continue;
+        }
+        const int64_t area = (X[1] - X[0]) * (Y[2] - Y[0]) - (Y[1] - Y[0]) * (X[2] - X[0]);
+        const int sign = area > 0 ? 1 : -1;
+        const int bx0 = int(std::clamp<int64_t>(minx >> 16, cx0, cx1)), bx1 = int(std::clamp<int64_t>((maxx >> 16) + 1, cx0, cx1));
+        int64_t row_e[4], dx_e[4], dy_e[4];
+        const int64_t sx0 = (int64_t(bx0) << 16) + 0x8000, cy0f = (int64_t(ymin) << 16) + 0x8000;
+        for (int e = 0; e < 4; ++e) {
+            const int f = (e + 1) & 3;
+            const int64_t ex = X[f] - X[e], ey = Y[f] - Y[e];
+            row_e[e] = (ex * (cy0f - Y[e]) - ey * (sx0 - X[e])) * sign;
+            dx_e[e] = -ey * 65536 * sign;
+            dy_e[e] = ex * 65536 * sign;
+        }
+        const int bw = bx1 - bx0;
+        for (int yy = ymin; yy < ymax; ++yy) {
+            if (row_ok(yy)) {
+                uint16_t* d = hi + size_t(yy) * W;
+                int64_t lo = 0, hi_k = bw - 1;
+                if (bw <= 6) {            // narrow: test each pixel
+                    int64_t e0 = row_e[0], e1 = row_e[1], e2 = row_e[2], e3 = row_e[3];
+                    for (int xx = bx0; xx < bx1; ++xx) {
+                        if ((e0 | e1 | e2 | e3) >= 0) d[xx] = nfb ? qb(d[xx]) : flat;
+                        e0 += dx_e[0]; e1 += dx_e[1]; e2 += dx_e[2]; e3 += dx_e[3];
+                    }
+                } else {                  // wide: the run where all four edges agree
+                    for (int e = 0; e < 4 && lo <= hi_k; ++e) {
+                        const int64_t rr = row_e[e], dd = dx_e[e];
+                        if (dd > 0) {     // rr + k*dd >= 0  <=>  k >= ceil(-rr / dd)
+                            const int64_t k = rr >= 0 ? -(rr / dd) : (-rr + dd - 1) / dd;
+                            lo = std::max(lo, k);
+                        } else if (dd < 0) {   // k <= floor(rr / -dd)
+                            const int64_t D = -dd;
+                            const int64_t k = rr >= 0 ? rr / D : -((-rr + D - 1) / D);
+                            hi_k = std::min(hi_k, k);
+                        } else if (rr < 0) {
+                            hi_k = -1;
+                        }
+                    }
+                    if (nfb) for (int64_t k = lo; k <= hi_k; ++k) { uint16_t& v = d[bx0 + int(k)]; v = qb(v); }
+                    else for (int64_t k = lo; k <= hi_k; ++k) d[bx0 + int(k)] = flat;
+                }
+            }
+            for (int e = 0; e < 4; ++e) row_e[e] += dy_e[e];
+        }
     }
 }
 
 struct Gfx::HiPool {
-    struct Batch { std::vector<HiRow> rows; std::vector<HiPix> pix; uint16_t* hi; int W, H; int left; };
+    struct Batch { std::vector<HiRow> rows; std::vector<HiPix> pix; uint16_t* hi; int W, H; int left; int stripe; };
     std::vector<std::thread> th;
     std::mutex m;
     std::condition_variable work_cv, done_cv;
@@ -395,7 +574,7 @@ struct Gfx::HiPool {
                 if (quit && next[size_t(w)] >= base + q.size()) return;
                 b = q[next[size_t(w)] - base];
             }
-            for (const HiRow& r : b->rows) hi_raster_row(r, b->pix.data() + r.first, b->hi, b->W, b->H, w, T);
+            for (const HiRow& r : b->rows) hi_raster_row(r, b->pix.data() + r.first, b->hi, b->W, b->H, w, T, b->stripe);
             {
                 std::lock_guard<std::mutex> l(m);
                 ++next[size_t(w)];
@@ -410,14 +589,24 @@ struct Gfx::HiPool {
     }
     void submit() {
         if (rows.empty()) { pix.clear(); return; }
+        // TDORT_HI_DUMP=file: append the batches drawn without workers (benchmarking).
+        static FILE* dump = [] { const char* e = std::getenv("TDORT_HI_DUMP"); return e ? std::fopen(e, "wb") : nullptr; }();
+        if (dump && T == 0) {
+            const uint32_t hdr[4] = {uint32_t(p_W), uint32_t(p_H), uint32_t(rows.size()), uint32_t(pix.size())};
+            std::fwrite(hdr, 4, 4, dump);
+            std::fwrite(rows.data(), sizeof(HiRow), rows.size(), dump);
+            std::fwrite(pix.data(), sizeof(HiPix), pix.size(), dump);
+            std::fflush(dump);
+        }
         if (T == 0) {                     // no workers: draw now
-            for (const HiRow& r : rows) hi_raster_row(r, pix.data() + r.first, p_hi, p_W, p_H, 0, 1);
+            for (const HiRow& r : rows) hi_raster_row(r, pix.data() + r.first, p_hi, p_W, p_H, 0, 1, 8);
             rows.clear(); pix.clear();
             return;
         }
         auto b = std::make_shared<Batch>();
         b->rows.swap(rows); b->pix.swap(pix);
         b->hi = p_hi; b->W = p_W; b->H = p_H; b->left = T;
+        b->stripe = hi_stripe(b->rows.data(), b->rows.size(), b->rows.empty() ? 1 : b->rows[0].scale);
         rows.reserve(1024); pix.reserve(65536);
         { std::lock_guard<std::mutex> l(m); q.push_back(std::move(b)); }
         work_cv.notify_all();
@@ -431,6 +620,9 @@ struct Gfx::HiPool {
     void discard() { wait(); rows.clear(); pix.clear(); p_hi = nullptr; }
 };
 
+// The cels of one picture of one screen, logged as they were drawn into its
+// shadow: each row as the workers draw it, which source row it came from, and
+// per cel a key (artwork, palette, format) and its four outer corners.
 Gfx::Gfx(Memory& mem) : mem_(mem), frame_(kWidth * kHeight, 0), pool_(std::make_unique<HiPool>()) {}
 Gfx::~Gfx() = default;
 
@@ -552,11 +744,74 @@ Gfx::Pixel Gfx::decode(uint32_t raw, int bpp, bool uncoded) const {
 
 uint16_t Gfx::process(const Pixel& p, uint16_t fb) const { return process_with(p, fb, r_.pixc, r_.flags); }
 
+// The pixel processor's result for one 5-bit channel depends only on the
+// control half-word, the PXOR flag, the cel's and the frame buffer's channel
+// values and the channel's multiplier: each control value in use gets a table
+// of all 9 x 32 x 32 cases, made the first time it is needed (by any thread).
+// TDORT_OLD_PIXC_TABLES=1: compute every pixel as before.
+static uint8_t blend_channel(uint32_t ctl, bool pxor, int32_t pc, int32_t fc, uint32_t amv) {
+    const bool prim_fb = ctl & 0x8000;
+    const uint32_t ms = (ctl >> 13) & 3, mf = ((ctl >> 10) & 7) + 1, sf = (ctl >> 8) & 3;
+    const uint32_t div = sf == 0 ? 16 : (1u << sf);
+    const uint32_t s2 = (ctl >> 6) & 3, av = (ctl >> 1) & 0x1F;
+    const bool two_d = ctl & 1;
+    const bool invert = av & 1, wrap = av & 4;
+    const uint32_t sdv_code = (av >> 3) & 3;
+    const uint32_t sdv = sdv_code == 1 ? 2 : sdv_code == 2 ? 4 : 1;
+    const int32_t prim = prim_fb ? fc : pc;
+    int32_t mult;
+    if (ms == 0) mult = int32_t(mf);
+    else if (ms == 1) mult = amv ? int32_t(amv) : int32_t(mf);
+    else mult = (pc >> 2) + 1;
+    const int32_t a = prim * mult / int32_t(div);
+    int32_t sec = 0;
+    if (s2 == 1) sec = int32_t(av);
+    else if (s2 == 2) sec = fc / int32_t(sdv);
+    else if (s2 == 3) sec = pc / int32_t(sdv);
+    int32_t res;
+    if (pxor) res = a ^ sec;
+    else if (s2 >= 2 && invert) res = a - sec;
+    else res = a + sec;
+    if (two_d) res >>= 1;
+    res = wrap ? (res & 31) : std::clamp(res, 0, 31);
+    return uint8_t(res);
+}
+
+static const uint8_t* make_blend_table(uint32_t ctl, bool pxor);
+static inline const uint8_t* blend_table(uint32_t ctl, bool pxor) {
+    // A cel uses one or two control values: remember the last one per thread.
+    thread_local uint32_t last_key = ~0u; thread_local const uint8_t* last = nullptr;
+    const uint32_t key = (ctl & 0xFFFF) | (pxor ? 0x10000u : 0u);
+    if (key != last_key) { last = make_blend_table(ctl, pxor); last_key = key; }
+    return last;
+}
+static const uint8_t* make_blend_table(uint32_t ctl, bool pxor) {
+    static std::atomic<const uint8_t*> tables[2][65536];
+    std::atomic<const uint8_t*>& slot = tables[pxor ? 1 : 0][ctl & 0xFFFF];
+    const uint8_t* t = slot.load(std::memory_order_acquire);
+    if (t) return t;
+    uint8_t* n = new uint8_t[9 * 32 * 32];
+    for (uint32_t m = 0; m < 9; ++m)
+        for (int32_t pc = 0; pc < 32; ++pc)
+            for (int32_t fc = 0; fc < 32; ++fc) n[(m * 32 + uint32_t(pc)) * 32 + uint32_t(fc)] = blend_channel(ctl, pxor, pc, fc, m);
+    const uint8_t* expected = nullptr;
+    if (slot.compare_exchange_strong(expected, n, std::memory_order_acq_rel)) return n;
+    delete[] n;                           // another thread made it first
+    return expected;
+}
+
 uint16_t Gfx::process_with(const Pixel& p, uint16_t fb, uint32_t pixc, uint32_t flags) {
     const uint32_t ctl = p.pmode ? (pixc >> 16) & 0xFFFF : pixc & 0xFFFF;
+    static const bool old_tables = std::getenv("TDORT_OLD_PIXC_TABLES") != nullptr;
     uint16_t out;
     if (ctl == 0x1F40 || ctl == 0x1F00) {
         out = p.color;          // normal mode: cel colour unchanged
+    } else if (!old_tables) {
+        const uint8_t* t = blend_table(ctl, (flags & kPxor) != 0);
+        auto ch = [&](int shift, uint8_t amv) {
+            return uint32_t(t[(uint32_t(std::min<uint8_t>(amv, 8)) * 32 + ((p.color >> shift) & 31)) * 32 + ((fb >> shift) & 31)]) << shift;
+        };
+        out = uint16_t(ch(10, p.amv_r) | ch(5, p.amv_g) | ch(0, p.amv_b));
     } else {
         const bool prim_fb = ctl & 0x8000;
         const uint32_t ms = (ctl >> 13) & 3, mf = ((ctl >> 10) & 7) + 1, sf = (ctl >> 8) & 3;
@@ -596,6 +851,17 @@ uint16_t Gfx::process_with(const Pixel& p, uint16_t fb, uint32_t pixc, uint32_t 
     return out;
 }
 
+static void make_row_blend(RowBlend& b, uint32_t ctl, uint32_t flags) {
+    static const bool old_tables = std::getenv("TDORT_OLD_PIXC_TABLES") != nullptr;
+    static const bool old_msb = std::getenv("TDORT_OLD_FB_MSB") != nullptr;
+    b = RowBlend{};
+    if (old_tables) { b.slow = true; return; }
+    b.direct = ctl == 0x1F40 || ctl == 0x1F00;
+    if (!b.direct) b.t = blend_table(ctl, (flags & kPxor) != 0);
+    b.fix_black = !(flags & kNoBlk);
+    b.old_msb = old_msb;
+}
+
 // ---- projector --------------------------------------------------------------
 
 void Gfx::plot(const CelTarget& t, int x, int y, const Pixel& px) {
@@ -609,18 +875,74 @@ void Gfx::plot(const CelTarget& t, int x, int y, const Pixel& px) {
 }
 
 // Corners in 16.16, order TL, TR, BR, BL. Fills pixels whose centres are inside.
+// The loops are bounded by the clip window and the bitmap (what plot() would
+// refuse), the edge functions are stepped rather than recomputed, and the
+// pixel processor is set up once for the quad. TDORT_OLD_FILL_QUAD=1: the
+// plain version, pixel by pixel through plot().
 void Gfx::fill_quad(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]) {
     // Face culling: a mirrored/rotated-away pixel has the opposite winding.
     const int64_t area = int64_t(x[1] - x[0]) * (y[2] - y[0]) - int64_t(y[1] - y[0]) * (x[2] - x[0]);
     if (area == 0) return;
     if (area > 0 && !(r_.flags & kAcw)) return;
     if (area < 0 && !(r_.flags & kAccw)) return;
+    static const bool old = std::getenv("TDORT_OLD_FILL_QUAD") != nullptr;
+    if (old) { fill_quad_plain(t, px, x, y); return; }
+
+    const int lx = std::max(t.clip_x, 0), ly = std::max(t.clip_y, 0);
+    const int hx = std::min(t.clip_x + t.clip_w, t.width), hy = std::min(t.clip_y + t.clip_h, t.height);
+    if (lx >= hx || ly >= hy) return;
+    const uint32_t ctl = px.pmode ? (r_.pixc >> 16) & 0xFFFF : r_.pixc & 0xFFFF;
+    const bool needs_fb = (ctl & 0x8000) || ((ctl >> 6) & 3) == 2;
+    const uint16_t flat = needs_fb ? 0 : process(px, 0);
+    auto put = [&](int xx, int yy) {
+        fb_write(t, xx, yy, needs_fb ? process(px, fb_read(t, xx, yy)) : flat);
+        ++pixels_written;
+    };
 
     // Axis-aligned fast path (the common unrotated sprite)
     if (y[0] == y[1] && y[2] == y[3] && x[0] == x[3] && x[1] == x[2]) {
         int32_t xa = std::min(x[0], x[1]), xb = std::max(x[0], x[1]);
         int32_t ya = std::min(y[0], y[3]), yb = std::max(y[0], y[3]);
         // pixel n is covered if its centre n+0.5 lies in [a, b)
+        int px0 = int((int64_t(xa) + 0x7FFF) >> 16), px1 = int((int64_t(xb) + 0x7FFF) >> 16);
+        int py0 = int((int64_t(ya) + 0x7FFF) >> 16), py1 = int((int64_t(yb) + 0x7FFF) >> 16);
+        px0 = std::max(px0, lx); px1 = std::min(px1, hx); py0 = std::max(py0, ly); py1 = std::min(py1, hy);
+        for (int yy = py0; yy < py1; ++yy)
+            for (int xx = px0; xx < px1; ++xx) put(xx, yy);
+        return;
+    }
+    int32_t minx = std::min({x[0], x[1], x[2], x[3]}), maxx = std::max({x[0], x[1], x[2], x[3]});
+    int32_t miny = std::min({y[0], y[1], y[2], y[3]}), maxy = std::max({y[0], y[1], y[2], y[3]});
+    const int bx0 = std::max<int>(int(minx >> 16), lx), bx1 = std::min<int>(int(maxx >> 16) + 1, hx);
+    const int by0 = std::max<int>(int(miny >> 16), ly), by1 = std::min<int>(int(maxy >> 16) + 1, hy);
+    if (bx0 >= bx1 || by0 >= by1) return;
+    const int64_t sign = area > 0 ? 1 : -1;
+    // e(x, y) = ex * (cy - y[e]) - ey * (cx - x[e]), times the winding's sign.
+    int64_t row_e[4], dx_e[4], dy_e[4];
+    const int64_t cx0 = (int64_t(bx0) << 16) + 0x8000, cy0 = (int64_t(by0) << 16) + 0x8000;
+    for (int e = 0; e < 4; ++e) {
+        const int f = (e + 1) & 3;
+        const int64_t ex = int64_t(x[f]) - x[e], ey = int64_t(y[f]) - y[e];
+        row_e[e] = (ex * (cy0 - y[e]) - ey * (cx0 - x[e])) * sign;
+        dx_e[e] = -ey * 65536 * sign;
+        dy_e[e] = ex * 65536 * sign;
+    }
+    for (int yy = by0; yy < by1; ++yy) {
+        int64_t e0 = row_e[0], e1 = row_e[1], e2 = row_e[2], e3 = row_e[3];
+        for (int xx = bx0; xx < bx1; ++xx) {
+            if ((e0 | e1 | e2 | e3) >= 0) put(xx, yy);
+            e0 += dx_e[0]; e1 += dx_e[1]; e2 += dx_e[2]; e3 += dx_e[3];
+        }
+        for (int e = 0; e < 4; ++e) row_e[e] += dy_e[e];
+    }
+}
+
+void Gfx::fill_quad_plain(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]) {
+    const int64_t area = int64_t(x[1] - x[0]) * (y[2] - y[0]) - int64_t(y[1] - y[0]) * (x[2] - x[0]);
+    // Axis-aligned fast path (the common unrotated sprite)
+    if (y[0] == y[1] && y[2] == y[3] && x[0] == x[3] && x[1] == x[2]) {
+        int32_t xa = std::min(x[0], x[1]), xb = std::max(x[0], x[1]);
+        int32_t ya = std::min(y[0], y[3]), yb = std::max(y[0], y[3]);
         int px0 = int((int64_t(xa) + 0x7FFF) >> 16), px1 = int((int64_t(xb) + 0x7FFF) >> 16);
         int py0 = int((int64_t(ya) + 0x7FFF) >> 16), py1 = int((int64_t(yb) + 0x7FFF) >> 16);
         for (int yy = py0; yy < py1; ++yy)

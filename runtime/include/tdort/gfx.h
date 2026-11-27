@@ -91,6 +91,7 @@ private:
     Pixel decode(uint32_t raw, int bpp, bool uncoded) const;
     uint16_t process(const Pixel& p, uint16_t fb) const;
     void fill_quad(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]);
+    void fill_quad_plain(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]);
     void plot(const CelTarget& t, int x, int y, const Pixel& px);
 
     struct Shadow {

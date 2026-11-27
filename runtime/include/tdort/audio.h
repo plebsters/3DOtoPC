@@ -85,8 +85,8 @@ public:
         // Math (multiply.dsp, timesplus.dsp, subtract.dsp, add.dsp): Output from the
         // InputA/B/C knobs, each driven by a connection or set by a tweak.
         enum class Op { Mul, TimesPlus, Sub, Add } op = Op::Mul;
-        std::map<std::string, int32_t> knobs;   // values as last tweaked
-        std::map<std::string, int32_t> mod;     // knobs driven by another instrument's output (ConnectInstruments to a knob)
+        std::map<std::string, int32_t, std::less<>> knobs;   // values as last tweaked (std::less<>: look up by const char* without a temporary string)
+        std::map<std::string, int32_t, std::less<>> mod;     // knobs driven by another instrument's output (ConnectInstruments to a knob)
         double   env = 0;                       // envelope.dsp: current level
         float    dc_in[2] = {0, 0}, dc_out[2] = {0, 0};   // DC blocker (movie players)
         enum class St { Stopped, Started, Released } st = St::Stopped;

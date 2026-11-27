@@ -1,4 +1,4 @@
-// platform_win32.cpp - Win32 window (GDI blit), XInput pad, keyboard, frame pacing.
+// platform_win32.cpp - Win32 window (Direct3D 11, or a GDI blit), XInput pad, keyboard, frame pacing.
 // Deliberately dependency-free: only Windows SDK libraries, nothing downloaded.
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -8,10 +8,12 @@
 #include <mmsystem.h>
 #include "tdort/platform.h"
 #include "png_write.h"
+#include "gpu_present.h"
 #include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -273,7 +275,7 @@ struct Win32Platform : Platform {
         case WM_SIZE: if (self) self->redraw(); return 0;
         case WM_PAINT: {
             PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
-            if (self) self->blit(dc);
+            if (self && !self->gpu_frame()) self->blit(dc);
             EndPaint(h, &ps); return 0;
         }
         }
@@ -314,6 +316,7 @@ struct Win32Platform : Platform {
         SetActiveWindow(hwnd);
         SetFocus(hwnd);
         apply_scale();
+        if (!std::getenv("TDORT_GDI")) gpu_on = gpu.init(hwnd);
         if (fullscreen) { fullscreen = false; set_fullscreen(true); }
         say("F1  \xC2\xB7  keys      F2  \xC2\xB7  controls", 3000);
         timeBeginPeriod(1);
@@ -534,6 +537,91 @@ struct Win32Platform : Platform {
         draw_panel(fps_mask, bw, bh, bw - margin - pw, margin, 1.0);
     }
 
+    // ---- the picture through Direct3D 11 (gpu_present.h), when it works.
+    // TDORT_GDI=1: always the GDI path below.
+    GpuPresenter gpu;
+    bool gpu_on = false;
+    std::vector<uint32_t> osd_img, fps_img;   // the panels as premultiplied pictures
+    int osd_w = 0, osd_h = 0, fps_w = 0, fps_h = 0;
+    uint64_t osd_ver = 0, fps_ver = 0;
+    std::string osd_key, fps_key;
+
+    // A panel (draw_panel's look) as a premultiplied BGRA picture, w x h.
+    void panel_image(const TextMask& tm, std::vector<uint32_t>& img, int& w, int& h) {
+        const int px = tm.px;
+        const int pad_x = px * 3 / 4, pad_y = px / 2;
+        const int radius = std::max(4, px / 2);
+        w = tm.w + pad_x * 2; h = tm.h + pad_y * 2;
+        img.assign(size_t(w) * h, 0);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                int cov = 256;
+                const int cx = x < radius ? radius - x : x >= w - radius ? x - (w - radius - 1) : 0;
+                const int cy = y < radius ? radius - y : y >= h - radius ? y - (h - radius - 1) : 0;
+                if (cx && cy) {
+                    const double d = std::sqrt(double(cx * cx + cy * cy)) - radius;
+                    if (d >= 0.5) continue;
+                    if (d > -0.5) cov = int((0.5 - d) * 256);
+                }
+                const uint32_t a = uint32_t(190 * cov >> 8);          // panel, of 256
+                const int tx = x - pad_x, ty = y - pad_y;
+                const uint32_t t = (tx >= 0 && ty >= 0 && tx < tm.w && ty < tm.h) ? tm.m[size_t(ty) * tm.w + tx] : 0;   // text, of 255
+                // Over a picture p: p * (1 - a) * (1 - t) + white * t.
+                const uint32_t keep = (256 - a) * (255 - t) / 255;           // of 256
+                const uint32_t alpha = std::min<uint32_t>(255, (256 - keep) * 255 / 256);
+                const uint32_t c = std::min<uint32_t>(255, t);
+                img[size_t(y) * w + x] = (alpha << 24) | (c << 16) | (c << 8) | c;
+            }
+    }
+
+    // Draw a frame with the graphics card; false: use GDI.
+    bool gpu_frame() {
+        if (!gpu_on) return false;
+        RECT cr; GetClientRect(hwnd, &cr);
+        const int cw = cr.right, ch = cr.bottom;
+        if (cw <= 0 || ch <= 0) return true;
+        int bx = 0, by = 0, bw = 0, bh = 0;
+        if (!last.empty()) box(cw, ch, bx, by, bw, bh);
+        GpuPresenter::Overlay ov[2];
+        int n = 0;
+        if (!last.empty() && bw > 0 && bh > 0) {
+            if (show_fps && !fps_text.empty()) {
+                const int px = std::clamp(bh / 40, 11, 26);
+                if (fps_text != fps_mask.text || px != fps_mask.px) build_mask(fps_mask, fps_text, px, 6);
+                const std::string key = fps_text + "|" + std::to_string(px);
+                if (!fps_mask.m.empty()) {
+                    if (key != fps_key) { panel_image(fps_mask, fps_img, fps_w, fps_h); fps_key = key; ++fps_ver; }
+                    const int margin = std::max(6, px / 2);
+                    ov[n].px = fps_img.data(); ov[n].w = std::min(fps_w, bw); ov[n].h = std::min(fps_h, bh);
+                    ov[n].x = bx + bw - margin - fps_w; ov[n].y = by + margin; ov[n].version = fps_ver;
+                    if (ov[n].w == fps_w && ov[n].h == fps_h && ov[n].x >= bx) ++n;
+                }
+            }
+            if (!osd.empty()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= osd_until) osd.clear();
+                else {
+                    const double left_ms = std::chrono::duration<double, std::milli>(osd_until - now).count();
+                    const int px = std::clamp(bh / 32, 13, 34);
+                    if (osd != osd_mask.text || px != osd_mask.px || osd_tab != osd_mask.tab) build_mask(osd_mask, osd, px, osd_tab);
+                    const std::string key = osd + "|" + std::to_string(px) + "|" + std::to_string(osd_tab);
+                    if (!osd_mask.m.empty()) {
+                        if (key != osd_key) { panel_image(osd_mask, osd_img, osd_w, osd_h); osd_key = key; ++osd_ver; }
+                        const int margin = std::max(6, px / 2);
+                        ov[n].px = osd_img.data(); ov[n].w = osd_w; ov[n].h = osd_h;
+                        ov[n].x = bx + margin; ov[n].y = by + margin; ov[n].version = osd_ver;
+                        ov[n].fade = float(std::min(1.0, left_ms / 300.0));    // fades out over the last 0.3 s
+                        if (osd_w <= bw - margin && osd_h <= bh - margin) ++n;
+                    }
+                }
+            }
+        }
+        const int lk = look == LookSmooth ? 1 : look == LookScanlines ? 2 : 0;
+        if (gpu.render(last.empty() ? nullptr : last.data(), fw, fh, bx, by, bw, bh, lk, ov, n)) return true;
+        gpu_on = false;                    // the device failed: GDI from now on
+        return false;
+    }
+
     void blit(HDC dc) {
         RECT cr; GetClientRect(hwnd, &cr);
         const int cw = cr.right, ch = cr.bottom;
@@ -569,6 +657,7 @@ struct Win32Platform : Platform {
             if (hsh != last_hash) { last_hash = hsh; ++fps_changes; }
         }
         fw = w; fh = h; last.assign(px, px + size_t(w) * h);
+        if (gpu_frame()) return;
         HDC dc = GetDC(hwnd); blit(dc); ReleaseDC(hwnd, dc);
     }
 
@@ -632,7 +721,7 @@ struct Win32Platform : Platform {
             char b[160];
             std::snprintf(b, sizeof b, "%.0f fps  \xC2\xB7  game %.0f fps  \xC2\xB7  %.1f ms (max %.1f) of %.1f",
                           fps_frames / secs, fps_changes / secs, fps_work / std::max(1, fps_frames), fps_work_max, 1000.0 / hz);
-            fps_text = b;
+            fps_text = std::string(b) + (gpu_on ? "  \xC2\xB7  D3D11" : "  \xC2\xB7  GDI");
             fps_since = now; fps_frames = fps_changes = 0; fps_work = fps_work_max = 0;
         }
         if (next > now) std::this_thread::sleep_until(next); else next = now;

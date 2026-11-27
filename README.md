@@ -352,7 +352,7 @@ For testing without a window: `TDORT_STATE_SAVE=<frame>:<slot>` and `TDORT_STATE
 | F8 | Picture shape: **4:3** (black bars), **Pixel perfect** (4:3 at a whole-number size, so every pixel is the same size), **Stretch** to the window |
 | F9 | Look: **Sharp** pixels, **Smooth** (filtered), **Scanlines** (CRT-style dark lines; best at 3x or more) |
 | F11 or Alt+Enter | Fullscreen on and off (a borderless window over the whole monitor, so switching is instant) |
-| Ctrl+F | Frame counter (top right): frames per second the window shows, how many times a second the game's picture actually changed, and the milliseconds each frame took to make (average, worst, and the budget, 16.7 at 60 Hz). Over budget means the game slows down and the sound can click |
+| Ctrl+F | Frame counter (top right): frames per second the window shows, how many times a second the game's picture actually changed, and the milliseconds each frame took to make (average, worst, and the budget, 16.7 at 60 Hz), then D3D11 or GDI (how the window is drawn). Over budget means the game slows down and the sound can click |
 | F12 | Detail: draws the game at 1x, 2x, 3x or 4x the 3DO's resolution (320x240 up to 1280x960). 3D games, and sprites that turn or shrink, get smooth edges and the full detail of far-away textures. 1x is the picture exactly as on the console. Default 2x |
 
 A short message in a rounded panel at the top left confirms each change (F1 lists every key). The settings are kept in
@@ -461,6 +461,10 @@ Environment variables:
 | `TDORT_LOG_AUDIO_ITEMS=1` | logs every audio item made and every item deleted (debugging) |
 | `TDORT_HI_THREADS=n` | worker threads drawing the finer picture (default: CPU threads - 1, at most 6; 0 = on the game's thread) |
 | `TDORT_HI_STATS=1` | prints how long the game waited for those workers (debugging) |
+| `TDORT_GDI=1` | the window draws with GDI instead of Direct3D 11 |
+| `TDORT_HI_DUMP=file` | with `TDORT_HI_THREADS=0`, writes every batch of finer-picture rows to the file (for benchmarking the rasterizer) |
+| `TDORT_OLD_PIXC_TABLES=1` | the pixel processor computes every pixel (no lookup tables) |
+| `TDORT_OLD_FILL_QUAD=1` | the 1x cel engine fills polygons pixel by pixel as before |
 | `TDORT_SCALE=1..4` | internal resolution, overriding the F12 setting (headless snapshots are taken at that size too) |
 | `TDORT_TRACE_FROM=<frame>` | turns on `--trace` logging at that frame (debugging a long session) |
 | `TDORT_SMALL_ALLOC_FLOOR_KB=0` | no 32 KB floor for small allocations (the size in KB; 0 turns it off) |
@@ -674,6 +678,33 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* The window now shows the picture through Direct3D 11: the game's picture is uploaded once
+  a frame and the graphics card scales it into the window with the chosen look (sharp,
+  smooth, scanlines), and the message and frame-counter panels are blended on top. Before,
+  every screen pixel was scaled and filtered on the CPU and copied with GDI, which at 1440p
+  or 4K fullscreen took a large part of each frame. Nothing new is needed to build or run
+  (d3d11.dll and d3dcompiler_47.dll come with Windows 10 and 11 and are loaded at start);
+  if Direct3D isn't available or the device fails, the window falls back to the GDI path
+  as before. The Ctrl+F counter ends with "D3D11" or "GDI" to show which is in use
+  (`TDORT_GDI=1`: always GDI).
+* The finer picture's worker threads share the work better: they take turns by stripes of
+  8 game lines when a frame's pixel quads are large (16 rows at 2x, 32 at 4x, instead of 8),
+  so far fewer quads are set up by two workers; a quad in another worker's stripe is dropped
+  before most of its setup, columns of a tall row (a wall) that can't reach a worker's
+  stripe are skipped in one step, and quads smaller than a pixel that cover no pixel centre
+  are dropped at once. On recorded frames the slowest of 6 workers needs 28% less time in a
+  Crash 'n Burn race at 4x and 53% less in Monster Manor's corridors at 3x; one worker alone
+  is 45% faster in Monster Manor. The pictures are identical with 1, 2, 4 and 6 workers.
+* Faster drawing, the same picture: the pixel processor now looks each control value up in
+  a table of all its cases (made once, 9 KB) instead of working out every pixel; the 1x
+  cel engine steps its edge tests across a polygon instead of recomputing them per pixel,
+  and sets up the blend once per polygon; the finer picture's rows work out their clip
+  window and blend modes once per row; and the sound mixer no longer builds a string for
+  every knob it reads each sample. A Crash 'n Burn race runs about 11% faster at 1x and at
+  4x (the whole emulation, headless). Pictures were compared byte for byte with the old
+  code at 1x to 4x in Crash 'n Burn, Monster Manor and Samurai Shodown, and the regression
+  and movie tests give the same results (`TDORT_OLD_PIXC_TABLES=1`, `TDORT_OLD_FILL_QUAD=1`:
+  the old code).
 * Pebble Beach Golf Links: the course (fairways, rough, bunkers) was drawn in shades of
   blue. Each patch of the course is drawn into a spare buffer, then a shading polygon is
   drawn into the display buffer with SetReadAddress pointing at the spare one, so the
