@@ -15,8 +15,9 @@ static void usage() {
     std::puts("usage:\n"
               "  \"3DO to PC CLI\" inspect <disc.iso>\n"
               "  \"3DO to PC CLI\" convert <disc.iso> <out_dir> [--name N] [--runtime DIR] [--hints FILE]\n"
-              "                 [--launchme PATH] [--no-build] [--debug] [--no-scan]\n"
+              "                 [--launchme PATH] [--no-build] [--debug] [--no-scan] [--cover IMAGE]\n"
               "                 [--disc DISC2] [--disc DISC3] ...   (other discs of the game)\n"
+              "  \"3DO to PC CLI\" cover <disc.iso> <cover.png>   (the cover art a conversion would use)\n"
               "  \"3DO to PC CLI\" toolchain");
 }
 
@@ -24,6 +25,14 @@ int main(int argc, char** argv) {
     if (argc < 2) { usage(); return 1; }
     const std::string cmd = argv[1];
     if (cmd == "inspect" && argc >= 3) return tdo_inspect(argv[2], on_log, nullptr);
+    if (cmd == "cover" && argc >= 4) {
+        char src[512];
+        const int rc = tdo_find_cover(argv[2], argv[3], src, sizeof src);
+        if (rc == 0) std::printf("Cover from %s, written to %s\n", src, argv[3]);
+        else if (rc == 1) std::puts("No cover: no image beside the disc and no title picture on it.");
+        else std::puts("error: could not read the disc or write the image");
+        return rc;
+    }
     if (cmd == "toolchain") {
         char buf[1024]; int rc = tdo_detect_toolchain(buf, sizeof buf);
         std::puts(buf); return rc;
@@ -44,6 +53,7 @@ int main(int argc, char** argv) {
             else if (a == "--no-build") o.build = 0;
             else if (a == "--debug") o.release = 0;
             else if (a == "--no-scan") o.scan_prologues = 0;
+            else if (a == "--cover") o.cover_path = next();
             else { usage(); return 1; }
         }
         // Disc folders left from an earlier conversion would count as extra

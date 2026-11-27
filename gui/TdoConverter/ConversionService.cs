@@ -14,6 +14,8 @@ public sealed record ConversionRequest(
 {
     /// Discs 2, 3, ... of a multi-disc game (unpacked to data_disc2, ...).
     public IReadOnlyList<string> ExtraDiscs { get; init; } = Array.Empty<string>();
+    /// A picture chosen for the cover (window and exe icon); null finds one.
+    public string? CoverPath { get; init; }
 }
 
 /// <summary>Runs the native pipeline on a background thread. Everything is local.</summary>
@@ -21,6 +23,9 @@ public sealed class ConversionService
 {
     public event Action<int, string>? Log;            // level, message
     public event Action<Stage, float>? Progress;
+
+    public Task<(int rc, string source)> FindCoverAsync(string disc, string outPng) =>
+        Task.Run(() => NativeMethods.FindCover(disc, outPng));
 
     public Task<int> InspectAsync(string disc) => Task.Run(() =>
     {
@@ -62,12 +67,13 @@ public sealed class ConversionService
             Build = r.Build ? 1 : 0,
             ScanPrologues = r.ScanPrologues ? 1 : 0,
             Release = r.Release ? 1 : 0,
+            CoverPath = NativeMethods.Utf8(string.IsNullOrWhiteSpace(r.CoverPath) ? null : r.CoverPath),
         };
         try { return NativeMethods.tdo_convert(ref o, log, prog, IntPtr.Zero); }
         finally
         {
             NativeMethods.Free(o.DiscPath); NativeMethods.Free(o.OutputDir); NativeMethods.Free(o.GameName);
-            NativeMethods.Free(o.HintsPath); NativeMethods.Free(o.LaunchMe);
+            NativeMethods.Free(o.HintsPath); NativeMethods.Free(o.LaunchMe); NativeMethods.Free(o.CoverPath);
             GC.KeepAlive(log); GC.KeepAlive(prog);
         }
     });

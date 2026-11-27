@@ -3,6 +3,7 @@
 #include "tdo/opera_fs.h"
 #include "tdo/recomp.h"
 #include "tdo/toolchain.h"
+#include "cover.h"
 #include "tdort/aif.h"
 #include <algorithm>
 #include <functional>
@@ -247,6 +248,26 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
         if (!disc.read_file(*exe_entry, exe_bytes, err)) { cx.error(err); return 4; }
     }
     if (exe_bytes.empty()) { cx.error("could not read " + launch); return 4; }
+
+    // Cover art (cover.png, and the .exe icon after the build): the one chosen
+    // in the app, else an image beside the disc, else the disc's title picture.
+    tdo::Image cover;
+    std::string cover_src;
+    {
+        std::vector<uint8_t> bytes;
+        if (opt.cover_path && *opt.cover_path) {
+            if (tdo::load_image(fs::u8path(opt.cover_path), cover)) cover_src = fs::u8path(opt.cover_path).filename().u8string();
+            else cx.warn(std::string("cover image could not be read: ") + opt.cover_path);
+        }
+        if (cover_src.empty()) cover_src = tdo::find_user_cover(fs::u8path(opt.disc_path), bytes, cover);
+        if (cover_src.empty()) {
+            std::ifstream bf(data / "BannerScreen", std::ios::binary);
+            std::vector<uint8_t> banner((std::istreambuf_iterator<char>(bf)), std::istreambuf_iterator<char>());
+            if (!banner.empty() && tdo::decode_banner(banner, cover)) cover_src = "the disc's title picture (BannerScreen)";
+        }
+        if (!cover_src.empty() && tdo::save_cover(cover, out / "cover.png")) cx.info("Cover: " + cover_src + ", saved as cover.png");
+        else { cover = tdo::Image{}; cx.info("Cover: none found (put cover.jpg or <disc name>.png beside the disc to add one)"); }
+    }
     tdort::AifImage img;
     if (!tdort::parse_aif(exe_bytes, img, err)) { cx.error(launch + ": " + err); return 4; }
     cx.info(fmt("%s: AIF %s-endian, base=%08X entry=%08X ro=%u rw=%u zi=%u%s",
@@ -457,6 +478,13 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
     // builds one file at a time otherwise; Ninja is parallel either way).
     std::string build = pre + "\"" + tc.cmake + "\" --build \"" + bdir.u8string() + "\" --config " + cfg + " --parallel";
     if (tdo::run_command(build, out.u8string(), echo) != 0) { cx.error("Build failed"); return 8; }
+#if defined(_WIN32)
+    if (!cover.rgba.empty()) {
+        std::string ierr;
+        if (tdo::set_exe_icon(out / (exe + ".exe"), cover, ierr)) cx.info("Icon: made from the cover");
+        else cx.warn("Icon: " + ierr);
+    }
+#endif
 
     cx.progress(TDO_STAGE_DONE, 1);
     cx.info("Done: " + (out / exe).u8string() + (std::string(
@@ -474,6 +502,50 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
 extern "C" {
 
 TDO_API const char* tdo_version(void) { return "3DO to PC 0.1.0"; }
+
+TDO_API int32_t tdo_find_cover(const char* disc_path, const char* out_png, char* source_buf, int32_t source_len) {
+    auto give = [&](const std::string& src) {
+        if (source_buf && source_len > 0) {
+            const size_t n = std::min<size_t>(src.size(), size_t(source_len - 1));
+            std::memcpy(source_buf, src.data(), n); source_buf[n] = 0;
+        }
+    };
+    give("");
+    if (!disc_path || !out_png) return 2;
+    try {
+        fs::path input = fs::u8path(disc_path);
+        tdo::Image img;
+        std::vector<uint8_t> bytes;
+        std::string src = tdo::find_user_cover(input, bytes, img);
+        if (src.empty()) {
+            std::vector<uint8_t> banner;
+            std::error_code ec;
+            if (fs::is_directory(input, ec)) {
+                std::ifstream bf(input / "BannerScreen", std::ios::binary);
+                banner.assign(std::istreambuf_iterator<char>(bf), std::istreambuf_iterator<char>());
+            } else {
+                if (lower(input.extension().u8string()) == ".cue") {
+                    std::ifstream cue(input);
+                    std::string line;
+                    while (std::getline(cue, line)) {
+                        auto q1 = line.find('"'), q2 = line.rfind('"');
+                        if (line.find("FILE") != std::string::npos && q1 != std::string::npos && q2 > q1) {
+                            input = input.parent_path() / fs::u8path(line.substr(q1 + 1, q2 - q1 - 1)); break;
+                        }
+                    }
+                }
+                tdo::OperaDisc disc; std::string err;
+                if (disc.open(input.u8string(), err))
+                    if (const tdo::OperaEntry* e = disc.find("BannerScreen")) disc.read_file(*e, banner, err);
+            }
+            if (!banner.empty() && tdo::decode_banner(banner, img)) src = "the disc";
+        }
+        if (src.empty()) return 1;
+        if (!tdo::save_cover(img, fs::u8path(out_png))) return 2;
+        give(src);
+        return 0;
+    } catch (...) { return 2; }
+}
 
 TDO_API int32_t tdo_inspect(const char* disc_path, tdo_log_cb log, void* user) {
     Ctx cx{log, nullptr, user};

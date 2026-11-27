@@ -16,7 +16,8 @@ set(TDO_CORE_SOURCES
     core/src/analysis.cpp
     core/src/emit_cpp.cpp
     core/src/toolchain.cpp
-    core/src/pipeline.cpp)
+    core/src/pipeline.cpp
+    core/src/cover.cpp)
 
 # Static core for the CLI and tests.
 add_library(tdocore STATIC ${TDO_CORE_SOURCES})

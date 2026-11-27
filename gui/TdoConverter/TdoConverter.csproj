@@ -34,6 +34,7 @@
   <!-- The 3DO2PC icon: on the .exe (ApplicationIcon) and on every window. -->
   <ItemGroup>
     <Resource Include="..\..\assets\3do2pc.ico" Link="3do2pc.ico" />
+    <Resource Include="..\..\assets\3do2pc.png" Link="3do2pc.png" />
   </ItemGroup>
 
 </Project>

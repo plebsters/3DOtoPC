@@ -299,6 +299,8 @@ struct Win32Platform : Platform {
     bool open(const char* title, int w, int h) override {
         WNDCLASSW wc{}; wc.lpfnWndProc = proc; wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = L"tdort"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        // The game's icon (made from its cover by the converter), if it has one.
+        wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
         RegisterClassW(&wc);
         load_settings();
         (void)w; (void)h;

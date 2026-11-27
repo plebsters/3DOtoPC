@@ -36,6 +36,8 @@ typedef struct tdo_convert_options {
     int32_t     build;            /* 1 = compile the exe with the local toolchain */
     int32_t     scan_prologues;   /* 1 = extra function discovery heuristics */
     int32_t     release;          /* 1 = Release build, 0 = Debug */
+    const char* cover_path;       /* cover image (PNG/JPEG/BMP); NULL = an image beside the
+                                     disc, else the disc's own title picture (BannerScreen) */
 } tdo_convert_options;
 
 TDO_API const char* tdo_version(void);
@@ -51,6 +53,13 @@ TDO_API int32_t tdo_convert(const tdo_convert_options* opts, tdo_log_cb log,
  * normally <out_dir>/data_disc2, data_disc3, ... next to the game's data folder.
  * The runtime switches to a disc when the game asks for a file only it has. */
 TDO_API int32_t tdo_extract_disc(const char* disc_path, const char* dest_dir, tdo_log_cb log, void* user);
+
+/* Finds the cover art a conversion would use: an image beside the disc
+ * (<disc name>.png/.jpg, cover.*, folder.*, boxart.* in its folder), else the
+ * title picture on the disc (BannerScreen; the developer-kit sample is skipped).
+ * Writes it to out_png as PNG and its origin ("cover.jpg", "the disc") to
+ * source_buf. Returns 0 when one was found, 1 when there is none, 2 on error. */
+TDO_API int32_t tdo_find_cover(const char* disc_path, const char* out_png, char* source_buf, int32_t source_len);
 
 /* Describes the compiler that would be used, e.g. "Bundled LLVM (C:\...\clang-cl.exe)".
  * Writes into buf (UTF-8). Returns 0 if a usable toolchain exists. */

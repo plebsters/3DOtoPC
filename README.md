@@ -80,16 +80,61 @@ tag attaches it to the release next to the zip.
 
 ## The 3DO to PC window
 
-- **Browse…** for a disc image (.iso, .bin or .cue). The output folder fills in as
-  `games\<title>\` in the app's folder (title from the file name, tags like "(1994)(EU-US)[!]"
-  left out), which is where the launcher looks. A folder you pick yourself is kept.
+The window has two pages, picked at the top: **Single game** and **Batch convert**. The
+pill at the top right says which compiler was found (normally the bundled zig/clang).
+
+**Single game**
+
+- **Choose disc…** (or drop a .cue, .iso or .bin onto the window). The game name and
+  **Save to** folder fill in as `games\<title>\` in the app's folder (title from the file
+  name, tags like "(1994)(EU-US)[!]" left out), which is where the launcher looks. A name or
+  folder you type yourself is kept.
+- **Cover:** the card shows the picture the game will get as its window and exe icon (see
+  *Cover art* below). **Change cover…** picks another picture (or drop a .png/.jpg onto the
+  window); **Use the disc's** goes back to the one found.
 - A multi-disc game is found by name, as below: choosing any disc converts all of them
   together from disc 1.
-- **Batch…** picks several disc images at once and converts them one after another, with
-  the options shown, into `games\<title>\`. Discs of one game are converted together; a game
-  whose folder already has an .exe is skipped (delete the folder to convert it again). The
-  button becomes **Stop after this game** while the batch runs. At the end the log lists
-  what converted, failed or was skipped, and is saved as `games\batch-log.txt`.
+- **Advanced** (click Show):
+  - **Build the .exe** (on): compile the generated C++ into the game's .exe with the
+    compiler shown at the top. Off, the converter stops after writing the project (the
+    game's files in `data\`, the generated `src\*.cpp`, `CMakeLists.txt`) without compiling,
+    for looking at the code or building it later by hand (`cmake -S out -B out\build`).
+  - **Extra function discovery**: also look for code by its function prologues; try it when a
+    game reaches code the converter missed (the log and `tdort_report.txt` say so).
+  - **Release build** (on): an optimised game. Off: a Debug build, slower, for debugging.
+  - **Runtime hints**: the `interp_hits.txt` a converted game writes, so code it had to
+    interpret gets compiled next time.
+- The progress card shows the five steps (Read disc, Analyze, Generate code, Compile, Done);
+  the log under it has **Copy** and **Open output folder**. **Inspect disc** lists the disc's
+  files in the log.
+
+**Batch convert**
+
+- **Add discs…**, **Add a folder…** (searched to any depth) or drop discs and folders onto the
+  page. Discs of one game become one row and are converted together; a .bin next to its .cue
+  counts once. A row can be removed with its ×.
+- **Settings for all:** where the games go (`games\` by default), **Skip games already
+  converted** (a folder that already has an .exe; delete it to convert again), **Keep going
+  after a failure**, and the same Advanced options as the Single game page.
+- **Start** converts the waiting rows one after another into `<folder>\<title>\`. **Pause**
+  stops after the current game (Start then goes on with the rest); **Stop** stops after the
+  current game and leaves the rest out. A conversion in progress is never cut off. At the end
+  the log lists what converted, failed or was skipped, and is saved as `batch-log.txt` in that
+  folder.
+
+## Cover art
+
+Each converted game gets a cover: `cover.png` in its folder, the icon of its .exe (in
+Explorer, the taskbar and the launcher) and of its window. The converter looks, in order, for
+
+1. a picture you chose (**Change cover…**, or `--cover picture.png` on the command line);
+2. a picture next to the disc: `<disc name>.png` / `.jpg`, or `cover`, `folder` or `boxart`
+   `.png` / `.jpg` in the disc's folder;
+3. the title screen stored on the disc (`BannerScreen`, which most discs have; the
+   developer-kit sample picture some discs carry is ignored).
+
+With none of these the game keeps the 3DO to PC icon. Nothing is looked up online.
+`"3DO to PC CLI" cover game.cue cover.png` saves the cover a conversion would use.
 
 ## Multi-disc games
 
@@ -315,7 +360,8 @@ shows how much was shared ("Other programs: N blocks, M different").
 
 ```
 "3DO to PC CLI" inspect  game.iso
-"3DO to PC CLI" convert  game.iso out\ [--name N] [--hints interp_hits.txt] [--no-build] [--debug]
+"3DO to PC CLI" convert  game.iso out\ [--name N] [--hints interp_hits.txt] [--cover pic.png] [--no-build] [--debug]
+"3DO to PC CLI" cover    game.iso cover.png
 "3DO to PC CLI" toolchain
 ```
 To re-convert a game after updating 3DO to PC, convert its own `data` folder into the same
@@ -750,6 +796,13 @@ Fixes found by running games (each a difference from the real OS):
   is included) and tdocore.dll and the CLI carry their C++ runtime, so a PC needs nothing but
   the installer. The GitHub build converts a test disc with the bundled compiler alone and
   runs the result. `xinput1_4` is linked by name with MinGW (MSVC's xinput.lib is the same DLL).
+* Cover art: a converted game gets a cover (a picture you choose or put next to the disc, else
+  the title screen on the disc) as `cover.png`, its exe's icon and its window's icon. See
+  *Cover art*.
+* New look for the 3DO to PC window: a dark theme with **Single game** and **Batch convert**
+  pages. Single game shows the cover and the five conversion steps, with the build options
+  folded under Advanced; Batch convert has a queue (add discs or whole folders, drag and drop,
+  remove rows), per-game status and progress, skip/keep-going settings, and Pause and Stop.
   Each front end (zig-c++.exe...) has its tool built in: with spaces in the install path Ninja
   starts them by their short names (ZIG-C_~1.EXE), and the first test build took the tool from
   that name and failed ("unknown command: C_~1"). The installer then left out zig's `lib\std\Build\Cache`
