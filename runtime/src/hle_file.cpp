@@ -676,6 +676,11 @@ void Portfolio::install_file() {
 }
 
 void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
+    // TDORT_LOG_FILE_IO=1: every file-device command (debugging).
+    static const bool log_cmds = std::getenv("TDORT_LOG_FILE_IO") != nullptr;
+    if (log_cmds)
+        rt.log("file io: \"%s\" cmd %u offset %d send %u recv %u", f.guest_path.c_str(), unsigned(r8(info + ioinfo::Command)),
+               int32_t(r32(info + ioinfo::Offset)), r32(info + ioinfo::SendLen), r32(info + ioinfo::RecvLen));
     if (f.writable) {
         const uint8_t cmd = r8(info + ioinfo::Command);
         const int32_t offset = int32_t(r32(info + ioinfo::Offset));

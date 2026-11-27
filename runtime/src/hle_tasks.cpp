@@ -176,7 +176,13 @@ void Portfolio::task_exit(HleTask& t, const char* why) {
         t.owned_stack = 0;
     }
     if (t.program && t.image_hi) rt.unmap_modules(t.image_lo, t.image_hi);
-    if (t.program) delete_task_items(t);
+    // A thread's own items (ports, messages, I/O requests...) go with it too,
+    // as the kernel frees every task's resources. Royal Pro Wrestling's logo
+    // thread left its "ThreadMsgPort" behind; the movie thread made one with
+    // the same name, LaunchMe found the dead one and the two waited on each
+    // other. TDORT_OLD_THREAD_ITEMS=1: a thread's items outlive it.
+    static const bool keep_thread_items = std::getenv("TDORT_OLD_THREAD_ITEMS") != nullptr;
+    if (t.program || !keep_thread_items) delete_task_items(t);
     if (t.program) free_task_memory(t.item);   // a loaded program: all it owned (threads belong to their owner)
     if (HleItem* it = item(t.item)) it->alive = false;
     // The creator learns that its child (program or thread) has gone, as the

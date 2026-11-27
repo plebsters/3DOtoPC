@@ -33,6 +33,14 @@ static inline uint16_t rd16(const Memory& m, uint32_t a) {
 
 // Big-endian bit reader over guest memory.
 static inline uint32_t bits_at(const Memory& m, uint64_t bitpos, int n) {
+    // Up to 24 bits from a 4-byte big-endian window (cel pixels are at most
+    // 16 bits); bit by bit only at the very end of memory.
+    const uint64_t first = bitpos >> 3;
+    if (n > 0 && n <= 24 && first + 4 <= kRamEnd) {
+        const uint8_t* q = &m.ram[size_t(first)];
+        const uint32_t w = (uint32_t(q[0]) << 24) | (uint32_t(q[1]) << 16) | (uint32_t(q[2]) << 8) | q[3];
+        return (w << (bitpos & 7)) >> (32 - n);
+    }
     uint32_t v = 0;
     for (int i = 0; i < n; ++i, ++bitpos) {
         uint32_t byte = uint32_t(bitpos >> 3);
@@ -880,6 +888,15 @@ void Gfx::plot(const CelTarget& t, int x, int y, const Pixel& px) {
 // pixel processor is set up once for the quad. TDORT_OLD_FILL_QUAD=1: the
 // plain version, pixel by pixel through plot().
 void Gfx::fill_quad(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], const int32_t (&y)[4]) {
+    static const bool old_box0 = std::getenv("TDORT_OLD_QUAD_BOX") != nullptr;
+    if (!old_box0) {
+        // No pixel centre within the corners' extent (most quads: a source
+        // pixel drawn smaller than a screen pixel): nothing to draw.
+        const int32_t mnx = std::min(std::min(x[0], x[1]), std::min(x[2], x[3])), mxx = std::max(std::max(x[0], x[1]), std::max(x[2], x[3]));
+        if (((int64_t(mnx) - 0x8000 + 0xFFFF) >> 16) > ((int64_t(mxx) - 0x8000) >> 16)) return;
+        const int32_t mny = std::min(std::min(y[0], y[1]), std::min(y[2], y[3])), mxy = std::max(std::max(y[0], y[1]), std::max(y[2], y[3]));
+        if (((int64_t(mny) - 0x8000 + 0xFFFF) >> 16) > ((int64_t(mxy) - 0x8000) >> 16)) return;
+    }
     // Face culling: a mirrored/rotated-away pixel has the opposite winding.
     const int64_t area = int64_t(x[1] - x[0]) * (y[2] - y[0]) - int64_t(y[1] - y[0]) * (x[2] - x[0]);
     if (area == 0) return;
@@ -893,11 +910,20 @@ void Gfx::fill_quad(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], 
     if (lx >= hx || ly >= hy) return;
     const uint32_t ctl = px.pmode ? (r_.pixc >> 16) & 0xFFFF : r_.pixc & 0xFFFF;
     const bool needs_fb = (ctl & 0x8000) || ((ctl >> 6) & 3) == 2;
-    const uint16_t flat = needs_fb ? 0 : process(px, 0);
+    // Most quads are one source pixel scaled to under a destination pixel and
+    // cover no pixel centre at all: the colour is worked out at the first
+    // pixel written, not for every quad.
+    uint16_t flat = 0;
+    bool have_flat = false;
     auto put = [&](int xx, int yy) {
-        fb_write(t, xx, yy, needs_fb ? process(px, fb_read(t, xx, yy)) : flat);
+        if (needs_fb) fb_write(t, xx, yy, process(px, fb_read(t, xx, yy)));
+        else {
+            if (!have_flat) { flat = process(px, 0); have_flat = true; }
+            fb_write(t, xx, yy, flat);
+        }
         ++pixels_written;
     };
+    static const bool old_box = std::getenv("TDORT_OLD_QUAD_BOX") != nullptr;
 
     // Axis-aligned fast path (the common unrotated sprite)
     if (y[0] == y[1] && y[2] == y[3] && x[0] == x[3] && x[1] == x[2]) {
@@ -913,10 +939,31 @@ void Gfx::fill_quad(const CelTarget& t, const Pixel& px, const int32_t (&x)[4], 
     }
     int32_t minx = std::min({x[0], x[1], x[2], x[3]}), maxx = std::max({x[0], x[1], x[2], x[3]});
     int32_t miny = std::min({y[0], y[1], y[2], y[3]}), maxy = std::max({y[0], y[1], y[2], y[3]});
-    const int bx0 = std::max<int>(int(minx >> 16), lx), bx1 = std::min<int>(int(maxx >> 16) + 1, hx);
-    const int by0 = std::max<int>(int(miny >> 16), ly), by1 = std::min<int>(int(maxy >> 16) + 1, hy);
+    // Only pixels whose centres (n + 0.5) lie within the corners' extent can
+    // be inside; the box used to start a pixel early and end one late, and the
+    // (usually one or two) pixels it adds failed the edge tests anyway.
+    int bx0, bx1, by0, by1;
+    if (old_box) {
+        bx0 = std::max<int>(int(minx >> 16), lx); bx1 = std::min<int>(int(maxx >> 16) + 1, hx);
+        by0 = std::max<int>(int(miny >> 16), ly); by1 = std::min<int>(int(maxy >> 16) + 1, hy);
+    } else {
+        bx0 = std::max<int>(int((int64_t(minx) - 0x8000 + 0xFFFF) >> 16), lx);
+        bx1 = std::min<int>(int((int64_t(maxx) - 0x8000) >> 16) + 1, hx);
+        by0 = std::max<int>(int((int64_t(miny) - 0x8000 + 0xFFFF) >> 16), ly);
+        by1 = std::min<int>(int((int64_t(maxy) - 0x8000) >> 16) + 1, hy);
+    }
     if (bx0 >= bx1 || by0 >= by1) return;
     const int64_t sign = area > 0 ? 1 : -1;
+    if (!old_box && bx1 - bx0 == 1 && by1 - by0 == 1) {      // one candidate pixel: test it directly
+        const int64_t cx = (int64_t(bx0) << 16) + 0x8000, cy = (int64_t(by0) << 16) + 0x8000;
+        for (int e = 0; e < 4; ++e) {
+            const int f = (e + 1) & 3;
+            const int64_t ex = int64_t(x[f]) - x[e], ey = int64_t(y[f]) - y[e];
+            if ((ex * (cy - y[e]) - ey * (cx - x[e])) * sign < 0) return;
+        }
+        put(bx0, by0);
+        return;
+    }
     // e(x, y) = ex * (cy - y[e]) - ey * (cx - x[e]), times the winding's sign.
     int64_t row_e[4], dx_e[4], dy_e[4];
     const int64_t cx0 = (int64_t(bx0) << 16) + 0x8000, cy0 = (int64_t(by0) << 16) + 0x8000;
@@ -1000,6 +1047,28 @@ void Gfx::draw_one(const CelTarget& t, uint32_t src) {
     int64_t hx = r_.hdx, hy = r_.hdy;
     const int64_t vx = int64_t(r_.vdx) << 4, vy = int64_t(r_.vdy) << 4;
 
+    // A pixel's decoding depends only on the cel (flags, preamble, PLUT): with
+    // 8 bits or fewer each value is decoded once per cel, and 16-bit pixels
+    // reuse the last value (runs of one colour). TDORT_OLD_CEL_DECODE=1: decode
+    // every pixel.
+    static const bool old_decode = std::getenv("TDORT_OLD_CEL_DECODE") != nullptr;
+    const bool small_px = bpp <= 8 && !old_decode;
+    Pixel dtab[256];
+    uint8_t dval[256];
+    if (small_px) std::memset(dval, 0, sizeof dval);
+    uint32_t last_raw = ~0u;
+    Pixel last_px{};
+    auto dec = [&](uint32_t raw) -> Pixel {
+        if (small_px) {
+            raw &= 0xFF;
+            if (!dval[raw]) { dtab[raw] = decode(raw, bpp, uncoded); dval[raw] = 1; }
+            return dtab[raw];
+        }
+        if (old_decode) return decode(raw, bpp, uncoded);
+        if (raw != last_raw) { last_px = decode(raw, bpp, uncoded); last_raw = raw; }
+        return last_px;
+    };
+
     uint32_t row_addr = src;
     for (int row = 0; row < rows; ++row) {
         const int64_t nox = ox + vx, noy = oy + vy, nhx = hx + r_.hddx, nhy = hy + r_.hddy;
@@ -1014,7 +1083,7 @@ void Gfx::draw_one(const CelTarget& t, uint32_t src) {
             hrow = &hp.rows.back();
         }
         auto emit = [&](int col, uint32_t raw) {
-            Pixel px = decode(raw, bpp, uncoded);
+            const Pixel px = dec(raw);
             if (px.transparent) return;
             if (hrow && col >= 0 && col < 65536) {
                 pool_->pix.push_back(HiPix{uint16_t(col), px.color, uint8_t((px.pmode ? 1 : 0) | (px.msb ? 2 : 0)), px.amv_r, px.amv_g, px.amv_b});

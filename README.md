@@ -4,6 +4,13 @@ Turns a 3DO disc image you own into a native Windows `.exe`. Everything runs
 on the local PC: disc reading, analysis, code generation and compilation.
 There is no network code anywhere in the tool or in the games it produces.
 
+> **No Visual Studio needed.** The installer includes everything: its own compiler
+> (zig/clang with the MinGW-w64 headers and libraries, plus CMake and Ninja) and the .NET
+> runtime for its windows. Install it, then convert games. Nothing else to download, no
+> Windows SDK, no Visual C++ Redistributable, no administrator rights. The games it builds
+> run on any Windows 10 or 11 PC. (Building 3DO to PC itself from source still uses Visual
+> Studio; see [One-time setup](#one-time-setup).)
+
 ```
  disc.iso/.bin ──► Opera FS reader ──► data\ (extracted files)
                          │
@@ -24,17 +31,27 @@ There is no network code anywhere in the tool or in the games it produces.
 
 ## One-time setup
 
-Double-click **`Install-Prerequisites.bat`** (it asks for administrator rights). It installs
-only what's missing: Build Tools for Visual Studio 2022 (C++ x64 compiler, Windows SDK,
-C++ CMake tools) and the .NET 8 SDK (needed only for the `3DO to PC.exe` window app; add
-`-SkipDotNet` to skip it). This is the only step that uses the internet.
+**To use 3DO to PC:** run the installer (`3DO2PC-<version>-Setup.exe`, from the GitHub release
+or `Build-Installer.bat`). That's all: it includes the compiler that builds converted games
+(`toolchain\`: zig, CMake and Ninja) and the .NET runtime the windows need. Visual Studio,
+the Windows SDK, the .NET runtime and the Visual C++ Redistributable are **not** needed, and
+nothing asks for administrator rights. The games it builds use only DLLs that come with
+Windows 10 and 11. The first conversion takes about three minutes longer, once: zig builds
+its copy of the C runtime into `cache\zig`.
+
+**To build 3DO to PC itself from source** (developers): double-click
+**`Install-Prerequisites.bat`** (it asks for administrator rights). It installs only what's
+missing: Build Tools for Visual Studio 2022 (C++ x64 compiler, Windows SDK, C++ CMake tools)
+and the .NET 8 SDK (for the window apps; add `-SkipDotNet` to skip it).
 
 ## Building the Windows app
 
 Double-click **`Build-App.bat`**. It finds Visual Studio / Build Tools, builds the C++ core,
-then builds the WPF app (if the .NET 8 SDK is installed) into **`dist\`**:
-`3DO to PC.exe` (the app), `3DO to PC CLI.exe` (command line), `tdocore.dll` and `runtime\`.
-Keep those together; copy the whole `dist\` folder if you move it.
+then builds the WPF apps (if the .NET 8 SDK is installed, self-contained) into **`dist\`**:
+`3DO to PC.exe` (the app), `3DO to PC CLI.exe` (command line), `tdocore.dll`, `runtime\`, and
+`toolchain\`, the compiler for converting games, which `toolchain\Get-Toolchain.ps1` downloads
+once (pinned versions from PyPI, checked by SHA-256, kept in `build\downloads`). Keep those
+together; copy the whole `dist\` folder if you move it.
 
 ## Windows installer
 
@@ -52,11 +69,9 @@ What Setup does:
   the tool setup and the uninstaller, and optional desktop shortcuts.
 - Creates a `games\` folder next to the apps (the launcher looks there first) and a `cache\`
   folder for the compiled runtime, both writable.
-- Checks for Visual Studio C++ Build Tools and the .NET desktop runtime (8 or newer). If
-  either is missing, its last page offers to run `Install-Prerequisites.ps1`, which asks for
-  administrator rights and downloads only what is missing. It's also in the Start menu as
-  "Install the tools for converting games".
-- Removes a `toolchain\` folder left by the Nov 22 test build that bundled its own compiler.
+- Includes everything needed to convert and play games: the compiler (`toolchain\`) and the
+  .NET runtime of the two windows. Nothing else is downloaded or installed.
+- Installs `toolchain\` fresh on every upgrade (no leftovers from an older version).
 - Upgrades an older install in place. Uninstalling removes the program and its cache but
   keeps the games you converted.
 
@@ -289,7 +304,10 @@ used to compile the same blocks about 90 times (over 3,600 files). The conversio
 shows how much was shared ("Other programs: N blocks, M different").
 
 ### Compiler used for converted games (all local)
-1. `toolchain\` next to the app: portable `cmake\`, `ninja\`, `llvm\` (optional `windows-sdk.cmake`). Lets you ship a self-contained app.
+1. `toolchain\` next to the app (what the installer ships): `zig\` (clang with the MinGW-w64
+   headers and libraries; `zig-cc.exe`, `zig-c++.exe`, `zig-ar.exe`... are small front ends
+   built from `toolchain\zigwrap.cpp`), `cmake\`, `ninja\` and `zig-windows.cmake`. Set
+   `TDO_NO_BUNDLED_TOOLCHAIN=1` to skip it.
 2. Visual Studio / Build Tools, found through `vswhere.exe`.
 3. `cmake` on `PATH`.
 
@@ -470,9 +488,13 @@ Environment variables:
 | `TDORT_OLD_CHILD_PROGRAMS=1` | programs keep running after the program that started them ends |
 | `TDORT_OLD_DELETE_R0=1` | a task deleting itself leaves DeleteItem's result in the next task's r0 |
 | `TDORT_OLD_SHORT_DELAY=1` | timer delays under half a frame only yield (the task doesn't sleep) |
+| `TDORT_OLD_THREAD_ITEMS=1` | a thread's ports, messages and I/O requests stay after it ends |
+| `TDORT_LOG_FILE_IO=1` | logs every file-device command (file, command, offset, sizes) |
 | `TDORT_GDI=1` | the window draws with GDI instead of Direct3D 11 |
 | `TDORT_HI_DUMP=file` | with `TDORT_HI_THREADS=0`, writes every batch of finer-picture rows to the file (for benchmarking the rasterizer) |
 | `TDORT_OLD_PIXC_TABLES=1` | the pixel processor computes every pixel (no lookup tables) |
+| `TDORT_OLD_CEL_DECODE=1` | the 1x cel engine decodes every source pixel (no per-cel table) |
+| `TDORT_OLD_QUAD_BOX=1` | the 1x cel engine tests the old, wider box around each pixel quad |
 | `TDORT_OLD_FILL_QUAD=1` | the 1x cel engine fills polygons pixel by pixel as before |
 | `TDORT_SCALE=1..4` | internal resolution, overriding the F12 setting (headless snapshots are taken at that size too) |
 | `TDORT_TRACE_FROM=<frame>` | turns on `--trace` logging at that frame (debugging a long session) |
@@ -718,6 +740,22 @@ Fixes found by running games (each a difference from the real OS):
   Sorcery); the converter now keeps one it finds in its cache and copies it into later
   games whose programs ask for it. Twinkle Knights quit with "theCCB is NULL" without it:
   convert one of those discs first, then Twinkle Knights again.
+* No Visual Studio needed to convert games: the installer now ships its own compiler in
+  `toolchain\`: zig 0.17.1 (clang with the MinGW-w64 headers and libraries), CMake 3.31.6 and
+  Ninja 1.11.1, with front-end programs so CMake sees an ordinary compiler, and the C library
+  sources zig has for other systems left out (about 340 MB unpacked). Unlike the Nov 22 test
+  build (clang-cl, which still needed Microsoft's C runtime and Windows SDK files), it needs
+  nothing from Microsoft, and the games it builds use only DLLs that come with Windows. The
+  converter tries it before Visual Studio. The window apps are self-contained (the .NET runtime
+  is included) and tdocore.dll and the CLI carry their C++ runtime, so a PC needs nothing but
+  the installer. The GitHub build converts a test disc with the bundled compiler alone and
+  runs the result. `xinput1_4` is linked by name with MinGW (MSVC's xinput.lib is the same DLL).
+  Each front end (zig-c++.exe...) has its tool built in: with spaces in the install path Ninja
+  starts them by their short names (ZIG-C_~1.EXE), and the first test build took the tool from
+  that name and failed ("unknown command: C_~1"). The installer then left out zig's `lib\std\Build\Cache`
+  folder (its "leave out cache\" rule matched any folder named Cache); the rules now apply only
+  at the top of the package, and the GitHub build installs the Setup into a folder with spaces
+  and converts a test disc with the installed copy.
 * A program's start-up code calls the kernel's cstartup, which hands back the argument count
   and list and leaves argc in r4, argv in r5 and 0 in r6; r6 was left holding argv. Winning
   Post's opening program sends LaunchMe a message whose size is that untouched r6, and
@@ -739,6 +777,12 @@ Fixes found by running games (each a difference from the real OS):
   Tenjiku's timer thread (priority 150) ticks every 3 ms; each delay finished at once, it
   never stopped running and the main program never started (black screen)
   (`TDORT_OLD_SHORT_DELAY=1`: those delays only yield).
+* A thread's own items (message ports, messages, I/O requests) are deleted when it ends, as
+  the kernel frees every task's resources; only programs' items were before. Royal Pro
+  Wrestling's logo thread left its message port behind; its movie thread then made a port
+  with the same name, LaunchMe sent its start message to the dead one, and the two waited
+  on each other after the logo. The opening movie, title, mode select and matches now run
+  (`TDORT_OLD_THREAD_ITEMS=1`: a thread's items outlive it).
 * The window now shows the picture through Direct3D 11: the game's picture is uploaded once
   a frame and the graphics card scales it into the window with the chosen look (sharp,
   smooth, scanlines), and the message and frame-counter panels are blended on top. Before,
@@ -756,6 +800,23 @@ Fixes found by running games (each a difference from the real OS):
   are dropped at once. On recorded frames the slowest of 6 workers needs 28% less time in a
   Crash 'n Burn race at 4x and 53% less in Monster Manor's corridors at 3x; one worker alone
   is 45% faster in Monster Manor. The pictures are identical with 1, 2, 4 and 6 workers.
+* Faster cel decoding, the same picture: a cel's pixels with 8 bits or fewer are decoded once
+  per value per cel (decoding depends only on the cel's flags, preamble and colour table) and
+  16-bit pixels reuse the last value; source bits are read from a 4-byte window instead of
+  one bit at a time. With the changes below, a Crash 'n Burn race at 1x takes half the
+  instructions it did (regression at 1x and 2x, movies and race pictures byte for byte the
+  same; `TDORT_OLD_CEL_DECODE=1`: decode every pixel).
+* Faster again, with the same picture and sound: a Crash 'n Burn race at 1x now takes 36%
+  fewer instructions for the whole emulation. The sound mixer worked out every connection's
+  port names, gain knob names and knob values for each output sample (string searches,
+  number parsing, map lookups: about 14% of the time); these are now worked out once and
+  kept until a knob changes. Each source pixel of a cel is a small quad that usually covers
+  less than one screen pixel: the quad is now dropped at once when no pixel centre lies
+  within its corners, only pixels whose centres can be inside are tested, a single
+  candidate pixel is tested directly, and the blended colour is worked out only when a
+  pixel is written. Pictures (1x and 2x regression, movies, Crash 'n Burn at 1x and 4x) and
+  the sound of all test games are byte for byte the same (`TDORT_OLD_QUAD_BOX=1`: the old
+  quad bounds).
 * Faster drawing, the same picture: the pixel processor now looks each control value up in
   a table of all its cases (made once, 9 KB) instead of working out every pixel; the 1x
   cel engine steps its edge tests across a polygon instead of recomputing them per pixel,

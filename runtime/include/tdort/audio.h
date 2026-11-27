@@ -87,6 +87,12 @@ public:
         enum class Op { Mul, TimesPlus, Sub, Add } op = Op::Mul;
         std::map<std::string, int32_t, std::less<>> knobs;   // values as last tweaked (std::less<>: look up by const char* without a temporary string)
         std::map<std::string, int32_t, std::less<>> mod;     // knobs driven by another instrument's output (ConnectInstruments to a knob)
+        // Knob version: changes whenever a knob or a driven knob changes, so
+        // values worked out from knobs can be kept until then (not saved).
+        uint64_t kver = 0;
+        int32_t  c_amp = 0, c_freq = 0;
+        uint64_t c_amp_ver = ~0ull, c_freq_ver = ~0ull;
+        int8_t   wave = -1;                     // oscillator shape from the template name (-1: not yet known)
         double   env = 0;                       // envelope.dsp: current level
         float    dc_in[2] = {0, 0}, dc_out[2] = {0, 0};   // DC blocker (movie players)
         enum class St { Stopped, Started, Released } st = St::Stopped;
@@ -101,7 +107,18 @@ public:
         float    out_l = 0, out_r = 0;
         bool     busy = false;
     };
-    struct Conn { int32_t src; std::string src_port; int32_t dst; std::string dst_port; };
+    struct Conn {
+        int32_t src; std::string src_port; int32_t dst; std::string dst_port;
+        // Worked out once from the port names (prep_conn), not saved: the mixer
+        // used to search the names, parse the port number and build the gain
+        // knob names for every connection on every output sample.
+        mutable bool    prepped = false, dst_input = false;
+        mutable uint8_t src_side = 0, dst_side = 0;      // 0 both, 1 left, 2 right
+        mutable int8_t  math_k = -1;                     // InputA/B/C -> 0/1/2
+        mutable std::string g, lg, rg;                   // GainN, LeftGainN, RightGainN
+        mutable float   gl = 1, gr = 1;                  // mixer gains for this input...
+        mutable uint64_t gver = ~0ull;                   // ...as of this knob version of the mixer
+    };
 
     // ---- object management (item numbers come from the kernel) ----
     void add_instrument(int32_t item, const std::string& tmpl_name);
@@ -159,6 +176,9 @@ private:
     float envelope_gain(Instrument& in);
     bool  has_active_envelope(const Instrument& in) const;
     int32_t knob(const Instrument& in, const char* name, int32_t def) const;
+    uint64_t knob_gen_ = 0;
+    void knobs_changed(Instrument& in) { in.kver = ++knob_gen_; }
+    static void prep_conn(const Conn& c);
 };
 
 } // namespace tdort

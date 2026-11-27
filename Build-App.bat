@@ -4,7 +4,12 @@ rem   dist\"3DO to PC.exe" - the Windows app (needs the .NET 8 SDK to build)
 rem   dist\"3DO to PC CLI.exe" - command-line converter
 rem   dist\"3DO Launcher.exe" - lists your converted games and starts them
 rem   dist\tdocore.dll, dist\runtime\  - used by both to build games
-rem Requires: Build Tools for Visual Studio 2022 with "Desktop development with C++".
+rem   dist\toolchain\  - the compiler that builds converted games (zig, CMake, Ninja;
+rem                       downloaded once by toolchain\Get-Toolchain.ps1, about 340 MB unpacked)
+rem The apps are self-contained (the .NET runtime is included), so a PC that only
+rem runs the installer needs nothing else installed.
+rem Building this package requires: Build Tools for Visual Studio 2022 with
+rem "Desktop development with C++", and the .NET 8 SDK for the windowed apps.
 rem Build-App.bat /nopause : no pause and no Explorer window at the end (Build-Installer.bat uses it).
 setlocal EnableExtensions
 title Build 3DO to PC
@@ -49,7 +54,7 @@ if exist "build\CMakeCache.txt" if errorlevel 1 rmdir /s /q build
 
 rem ---------------------------------------------------------------- native core
 echo.
-echo [1/3] Building the converter core (C++)...
+echo [1/4] Building the converter core (C++)...
 cmake -S . -B build -G "%GEN%" -DCMAKE_BUILD_TYPE=Release -DTDO_BUILD_TESTS=OFF
 if errorlevel 1 goto :fail
 rem Show "[ 42% 21/50]" before every compiled file (Ninja builds only).
@@ -66,19 +71,19 @@ xcopy /e /i /q /y "runtime" "%DIST%\runtime" >nul || goto :fail
 
 rem ---------------------------------------------------------------- GUI
 echo.
-echo [2/3] Building the Windows app (C# WPF)...
+echo [2/4] Building the Windows apps (C# WPF, self-contained)...
 where dotnet >nul 2>nul
 if errorlevel 1 goto :nodotnet
-dotnet publish "gui\TdoConverter\TdoConverter.csproj" -c Release -r win-x64 --self-contained false -o "%DIST%"
+dotnet publish "gui\TdoConverter\TdoConverter.csproj" -c Release -r win-x64 --self-contained true -o "%DIST%"
 if errorlevel 1 goto :fail
 rem The app is named "3DO to PC" (the .NET launcher can be renamed freely).
 if exist "%DIST%\3DO to PC.exe" del /q "%DIST%\3DO to PC.exe"
 move /y "%DIST%\TdoConverter.exe" "%DIST%\3DO to PC.exe" >nul
 rem The game launcher: lists the converted games in games\ and starts them.
-dotnet publish "gui\Launcher\Launcher.csproj" -c Release -r win-x64 --self-contained false -o "%DIST%"
+dotnet publish "gui\Launcher\Launcher.csproj" -c Release -r win-x64 --self-contained true -o "%DIST%"
 if errorlevel 1 goto :fail
 set "GUI=yes"
-goto :done
+goto :toolchain
 
 :nodotnet
 echo   .NET 8 SDK not found, so the Windows app was skipped.
@@ -86,9 +91,15 @@ echo   Install it from https://dotnet.microsoft.com/download/dotnet/8.0 and run 
 echo   The command-line converter was built and works on its own.
 set "GUI=no"
 
+:toolchain
+echo.
+echo [3/4] Adding the compiler for converting games (zig, CMake, Ninja)...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0toolchain\Get-Toolchain.ps1" -Dest "%DIST%\toolchain"
+if errorlevel 1 goto :fail
+
 :done
 echo.
-echo [3/3] Done. Output: %DIST%
+echo [4/4] Done. Output: %DIST%
 if "%GUI%"=="yes" echo   "3DO to PC.exe"    - the Windows app
 echo   "3DO to PC CLI.exe" - command line:  "3DO to PC CLI" convert game.iso outfolder
 if defined NOPAUSE exit /b 0

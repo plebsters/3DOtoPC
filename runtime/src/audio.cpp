@@ -175,6 +175,7 @@ int32_t Audio::knob(const Instrument& in, const char* name, int32_t def) const {
 void Audio::set_knob(int32_t ins, const std::string& k, int32_t value) {
     if (Instrument* in = instrument(ins)) {
         in->knobs[k] = value;
+        knobs_changed(*in);
         if (k == "Frequency" || k == "Rate") in->pitch_step = -1;   // an explicit rate overrides note tags
     }
 }
@@ -194,6 +195,7 @@ void Audio::start(int32_t id, int32_t amplitude, int32_t rate, int32_t pitch, in
     in->st = Instrument::St::Started;
     in->paused = false;
     in->phase = 0;
+    knobs_changed(*in);
     if (amplitude >= 0) in->knobs["Amplitude"] = amplitude;
     else if (velocity >= 0) in->knobs["Amplitude"] = std::min(0x7FFF, velocity * 0x7FFF / 127);
     // AF_TAG_RATE and AF_TAG_FREQUENCY both set the player's Frequency knob
@@ -485,8 +487,8 @@ bool Audio::sampler_frame(Instrument& in, Attachment& a, float& l, float& r) {
     else {
         // Frequency knob: 0x4000 = 1.0 (one sample per 44.1 kHz frame). Real
         // Pinball plays its 22 kHz effects with 0x2000.
-        int32_t k = knob(in, "Frequency", knob(in, "Rate", in.freq_unit));
-        step = std::max(0, k) / double(in.freq_unit);
+        if (in.c_freq_ver != in.kver) { in.c_freq = knob(in, "Frequency", knob(in, "Rate", in.freq_unit)); in.c_freq_ver = in.kver; }
+        step = std::max(0, in.c_freq) / double(in.freq_unit);
     }
     step *= in.bend;
 
@@ -569,6 +571,17 @@ static int port_index(const std::string& port) {
     return i < port.size() ? std::atoi(port.c_str() + i) : 0;
 }
 
+void Audio::prep_conn(const Conn& c) {
+    c.dst_input = has(c.dst_port, "Input");
+    c.src_side = has(c.src_port, "Left") ? 1 : has(c.src_port, "Right") ? 2 : 0;
+    c.dst_side = has(c.dst_port, "Left") ? 1 : has(c.dst_port, "Right") ? 2 : 0;
+    c.math_k = c.dst_port == "InputA" ? 0 : c.dst_port == "InputB" ? 1 : c.dst_port == "InputC" ? 2 : -1;
+    const std::string n = std::to_string(port_index(c.dst_port));
+    c.g = "Gain" + n; c.lg = "LeftGain" + n; c.rg = "RightGain" + n;
+    c.gver = ~0ull;
+    c.prepped = true;
+}
+
 void Audio::eval(int32_t id, Instrument& in) {
     if (in.stamp == stamp_) return;
     if (in.busy) return;                 // feedback loop: use last frame's value
@@ -580,11 +593,16 @@ void Audio::eval(int32_t id, Instrument& in) {
     // output drives that knob. Games wire envelope.dsp into a mixer's gain
     // knobs to fade sound in and out (Real Pinball's movie player does).
     for (const Conn& c : conns_) {
-        if (c.dst != id || has(c.dst_port, "Input")) continue;
+        if (c.dst != id) continue;
+        if (!c.prepped) prep_conn(c);
+        if (c.dst_input) continue;
         auto it = ins_.find(c.src);
         if (it == ins_.end()) continue;
         eval(c.src, it->second);
-        in.mod[c.dst_port] = int32_t(std::clamp(it->second.out_l * 32767.0f, -32768.0f, 32767.0f));
+        const int32_t v = int32_t(std::clamp(it->second.out_l * 32767.0f, -32768.0f, 32767.0f));
+        auto m = in.mod.find(c.dst_port);
+        if (m == in.mod.end()) { in.mod.emplace(c.dst_port, v); knobs_changed(in); }
+        else if (m->second != v) { m->second = v; knobs_changed(in); }
     }
     switch (in.kind) {
     case Kind::Sampler:
@@ -594,7 +612,8 @@ void Audio::eval(int32_t id, Instrument& in) {
                 if (!a.active || a.envelope) continue;
                 if (!sampler_frame(in, a, l, r) && a.ended_flag) { a.ended_flag = false; attachment_ended(aid, a, in); }
             }
-            const float amp = in.silent ? 0.0f : std::clamp(knob(in, "Amplitude", 0x7FFF), 0, 0x7FFF) / 32767.0f * envelope_gain(in);
+            if (in.c_amp_ver != in.kver) { in.c_amp = knob(in, "Amplitude", 0x7FFF); in.c_amp_ver = in.kver; }
+            const float amp = in.silent ? 0.0f : std::clamp(in.c_amp, 0, 0x7FFF) / 32767.0f * envelope_gain(in);
             l *= amp; r *= amp;
             if (in.data_duck) {
                 // Movie sound never resets its sample values, so any seam in the
@@ -617,11 +636,14 @@ void Audio::eval(int32_t id, Instrument& in) {
             in.phase += hz / kRate;
             in.phase -= std::floor(in.phase);
             float v;
-            const std::string& n = in.tmpl;
-            if (has(n, "noise")) { in.noise = in.noise * 1664525u + 1013904223u; v = int32_t(in.noise) / 2147483648.0f; }
-            else if (has(n, "tri")) v = float(in.phase < 0.5 ? in.phase * 4 - 1 : 3 - in.phase * 4);
-            else if (has(n, "pulse") || has(n, "square")) v = in.phase < 0.5 ? 1.0f : -1.0f;
-            else if (has(n, "sine")) v = float(std::sin(in.phase * 6.283185307179586));
+            if (in.wave < 0) {
+                const std::string& n = in.tmpl;
+                in.wave = has(n, "noise") ? 1 : has(n, "tri") ? 2 : (has(n, "pulse") || has(n, "square")) ? 3 : has(n, "sine") ? 4 : 0;
+            }
+            if (in.wave == 1) { in.noise = in.noise * 1664525u + 1013904223u; v = int32_t(in.noise) / 2147483648.0f; }
+            else if (in.wave == 2) v = float(in.phase < 0.5 ? in.phase * 4 - 1 : 3 - in.phase * 4);
+            else if (in.wave == 3) v = in.phase < 0.5 ? 1.0f : -1.0f;
+            else if (in.wave == 4) v = float(std::sin(in.phase * 6.283185307179586));
             else v = float(in.phase * 2 - 1);
             v *= std::clamp(knob(in, "Amplitude", 0x7FFF), 0, 0x7FFF) / 32767.0f * envelope_gain(in);
             l = r = v;
@@ -656,14 +678,15 @@ void Audio::eval(int32_t id, Instrument& in) {
         }
         for (const Conn& c : conns_) {
             if (c.dst != id) continue;
-            int k = c.dst_port == "InputA" ? 0 : c.dst_port == "InputB" ? 1 : c.dst_port == "InputC" ? 2 : -1;
+            if (!c.prepped) prep_conn(c);
+            const int k = c.math_k;
             if (k < 0) continue;
             auto it = ins_.find(c.src);
             if (it == ins_.end()) continue;
             eval(c.src, it->second);
             const Instrument& s = it->second;
-            if (has(c.src_port, "Left")) v[k][0] = v[k][1] = s.out_l;
-            else if (has(c.src_port, "Right")) v[k][0] = v[k][1] = s.out_r;
+            if (c.src_side == 1) v[k][0] = v[k][1] = s.out_l;
+            else if (c.src_side == 2) v[k][0] = v[k][1] = s.out_r;
             else { v[k][0] = s.out_l; v[k][1] = s.out_r; }
         }
         for (int ch = 0; ch < 2; ++ch) {
@@ -681,25 +704,30 @@ void Audio::eval(int32_t id, Instrument& in) {
     default:     // Mixer, Output, Effect: sum the inputs
         if (running || in.kind == Kind::Effect) {
             for (const Conn& c : conns_) {
-                if (c.dst != id || !has(c.dst_port, "Input")) continue;
+                if (c.dst != id) continue;
+                if (!c.prepped) prep_conn(c);
+                if (!c.dst_input) continue;
                 auto it = ins_.find(c.src);
                 if (it == ins_.end()) continue;
                 eval(c.src, it->second);
                 const Instrument& s = it->second;
                 float sl, sr;
-                if (has(c.src_port, "Left")) sl = sr = s.out_l;
-                else if (has(c.src_port, "Right")) sl = sr = s.out_r;
+                if (c.src_side == 1) sl = sr = s.out_l;
+                else if (c.src_side == 2) sl = sr = s.out_r;
                 else { sl = s.out_l; sr = s.out_r; }
                 float gl = 1, gr = 1;
                 if (in.kind == Kind::Mixer) {
-                    const std::string n = std::to_string(port_index(c.dst_port));
-                    if (in.stereo) {
-                        gl = knob(in, ("LeftGain" + n).c_str(), knob(in, ("Gain" + n).c_str(), 0)) / 32767.0f;
-                        gr = knob(in, ("RightGain" + n).c_str(), knob(in, ("Gain" + n).c_str(), 0)) / 32767.0f;
-                    } else gl = gr = knob(in, ("Gain" + n).c_str(), 0) / 32767.0f;
+                    if (c.gver != in.kver) {
+                        if (in.stereo) {
+                            c.gl = knob(in, c.lg.c_str(), knob(in, c.g.c_str(), 0)) / 32767.0f;
+                            c.gr = knob(in, c.rg.c_str(), knob(in, c.g.c_str(), 0)) / 32767.0f;
+                        } else c.gl = c.gr = knob(in, c.g.c_str(), 0) / 32767.0f;
+                        c.gver = in.kver;
+                    }
+                    gl = c.gl; gr = c.gr;
                 }
-                if (has(c.dst_port, "Left")) { l += (sl + sr) * 0.5f * gl; continue; }
-                if (has(c.dst_port, "Right")) { r += (sl + sr) * 0.5f * gr; continue; }
+                if (c.dst_side == 1) { l += (sl + sr) * 0.5f * gl; continue; }
+                if (c.dst_side == 2) { r += (sl + sr) * 0.5f * gr; continue; }
                 l += sl * gl; r += sr * gr;
             }
             if (in.kind == Kind::Mixer && !in.stereo) r = l;

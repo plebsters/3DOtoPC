@@ -64,28 +64,28 @@ Toolchain detect_toolchain() {
     const fs::path app = fs::u8path(module_dir());
 
 #if defined(_WIN32)
-    // 1. Portable toolchain shipped next to the app.
+    // 1. Portable toolchain shipped next to the app (the installer includes
+    //    it): zig (clang with the MinGW-w64 headers and libraries), CMake and
+    //    Ninja. Nothing from Visual Studio or the Windows SDK is needed, and
+    //    the games it builds use only DLLs that come with Windows 10 and 11.
+    //    zig-windows.cmake points CMake at the small zig-*.exe front ends
+    //    (zig-c++.exe runs "zig c++ ...", and so on).
     fs::path bundled = app / "toolchain";
     fs::path b_cmake = bundled / "cmake" / "bin" / "cmake.exe";
     fs::path b_ninja = bundled / "ninja" / "ninja.exe";
-    fs::path b_clang = bundled / "llvm" / "bin" / "clang-cl.exe";
-    fs::path b_lld   = bundled / "llvm" / "bin" / "lld-link.exe";
-    if (fs::exists(b_cmake) && fs::exists(b_ninja) && fs::exists(b_clang)) {
+    fs::path b_zig   = bundled / "zig" / "zig.exe";
+    fs::path b_file  = bundled / "zig-windows.cmake";
+    if (!std::getenv("TDO_NO_BUNDLED_TOOLCHAIN") && fs::exists(b_cmake) && fs::exists(b_ninja) &&
+        fs::exists(b_zig) && fs::exists(bundled / "zig" / "zig-c++.exe") && fs::exists(b_file)) {
         t.found = true;
-        t.description = "Bundled LLVM (" + b_clang.u8string() + ")";
+        t.description = "Bundled zig/clang (" + bundled.u8string() + ")";
         t.cmake = b_cmake.u8string();
         t.generator = "Ninja";
         t.configure_args = {
             "-DCMAKE_MAKE_PROGRAM=" + quote(b_ninja.generic_u8string()),
-            "-DCMAKE_C_COMPILER=" + quote(b_clang.generic_u8string()),
-            "-DCMAKE_CXX_COMPILER=" + quote(b_clang.generic_u8string()),
-            "-DCMAKE_LINKER=" + quote(b_lld.generic_u8string()),
+            "-DCMAKE_TOOLCHAIN_FILE=" + quote(b_file.generic_u8string()),
             "--no-warn-unused-cli",   // the projects are C++ only: no "CMAKE_C_COMPILER not used" warning
         };
-        // The Windows SDK headers/libs are still required; xwin-style SDK
-        // copies can be placed in toolchain/winsdk and passed via a toolchain file.
-        fs::path tcfile = bundled / "windows-sdk.cmake";
-        if (fs::exists(tcfile)) t.configure_args.push_back("-DCMAKE_TOOLCHAIN_FILE=" + quote(tcfile.generic_u8string()));
         return t;
     }
 
@@ -154,8 +154,8 @@ Toolchain detect_toolchain() {
         if (run_command("ninja --version", app.u8string(), nullptr) == 0) t.generator = "Ninja";
         return t;
     }
-    t.description = "No compiler found. Install Visual Studio Build Tools (C++ workload) "
-                    "or place a portable toolchain in the app's toolchain\\ folder.";
+    t.description = "No compiler found. Reinstall 3DO to PC (its installer includes the compiler), "
+                    "or install Visual Studio Build Tools (C++ workload).";
     return t;
 }
 

@@ -78,7 +78,7 @@ bool write_game_cmake(const fs::path& out, const std::string& exe, const fs::pat
              "add_library(tdort STATIC IMPORTED)\n"
              "set_target_properties(tdort PROPERTIES IMPORTED_LOCATION \"" << cmake_path(prebuilt_lib) << "\"\n"
              "  INTERFACE_INCLUDE_DIRECTORIES \"" << cmake_path(runtime / "include") << "\")\n"
-             "if(WIN32)\n  set_property(TARGET tdort APPEND PROPERTY INTERFACE_LINK_LIBRARIES xinput winmm)\nendif()\n"
+             "if(WIN32)\n  if(MSVC)\n    set_property(TARGET tdort APPEND PROPERTY INTERFACE_LINK_LIBRARIES xinput winmm)\n  else()  # MinGW (the bundled compiler): xinput.lib is xinput1_4\n    set_property(TARGET tdort APPEND PROPERTY INTERFACE_LINK_LIBRARIES xinput1_4 winmm)\n  endif()\nendif()\n"
              "add_executable(" << exe << " WIN32 ${TDO_GENERATED} \"" << cmake_path(runtime / "src" / "main.cpp") << "\")\n";
     } else {
         o << "add_subdirectory(\"" << cmake_path(runtime) << "\" tdort)\n"

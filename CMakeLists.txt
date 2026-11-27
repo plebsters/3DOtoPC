@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.16)
 project(3DOtoPC CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# The C++ runtime is linked into tdocore.dll and the CLI, so they run on a PC
+# without the Visual C++ Redistributable (no Visual Studio needed to use them).
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(TDO_BUILD_TESTS "Build tests" ON)
 

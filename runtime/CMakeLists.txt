@@ -30,7 +30,11 @@ add_library(tdort STATIC
 target_include_directories(tdort PUBLIC include)
 target_compile_features(tdort PUBLIC cxx_std_17)
 if(WIN32)
-    target_link_libraries(tdort PUBLIC xinput winmm)
+    if(MSVC)
+        target_link_libraries(tdort PUBLIC xinput winmm)
+    else()   # MinGW (the bundled compiler): MSVC's xinput.lib is xinput1_4
+        target_link_libraries(tdort PUBLIC xinput1_4 winmm)
+    endif()
 endif()
 
 # main() lives in an object library so the game executable owns it.
