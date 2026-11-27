@@ -247,10 +247,11 @@ void Portfolio::preempt() {
     else if (c.cycles - slice_start > kSliceCycles) slice_start = c.cycles;
 }
 
-int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t pri) {
+int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t pri, bool module) {
     uint32_t pc = 0, stack_size = 0, argc = 0, argp = 0, sp = 0, base = c.r[9], owned_stack = 0;
     int32_t exit_msg = 0;
     bool has_pc = false;
+    uint32_t aif = 0, image_size = 0, cmdstr = 0;
     each_tag(tags, [&](uint32_t t, uint32_t a) {
         if (rt.cfg.trace) rt.log("CreateTask \"%s\" tag %u = %08X", name.c_str(), t, a);
         switch (t) {
@@ -262,11 +263,30 @@ int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t p
         case kTagTaskBase: base = a; break;
         case kTagTaskAllocdThreadSp: owned_stack = a; break;
         case 25 /* CREATETASK_TAG_MSGFROMCHILD */: exit_msg = int32_t(a); break;
+        case 18 /* CREATETASK_TAG_IMAGESZ */: image_size = a; break;
+        case 19 /* CREATETASK_TAG_AIF */: aif = a; break;
+        case 20 /* CREATETASK_TAG_CMDSTR */: cmdstr = a; break;
         default: break;
         }
     });
+    // A program the caller loaded itself (CREATETASK_TAG_AIF, the image's size
+    // and a command line): it runs where it is, as a task of its own, like
+    // LoadProgram. Sangokushi IV starts "open.x" this way.
+    // TDORT_OLD_TASK_AIF=1: refused.
+    if (!has_pc && aif && image_size && !std::getenv("TDORT_OLD_TASK_AIF")) {
+        if (!guest_range_ok(aif, image_size) || (aif & 3)) return kErrBadPtr;
+        std::vector<uint8_t> bytes(image_size);
+        for (uint32_t k = 0; k < image_size; ++k) bytes[k] = r8(aif + k);
+        std::string cmd = cmdstr ? rstr(cmdstr) : name;
+        if (cmd.empty()) cmd = name;
+        std::string why;
+        const int32_t t = start_program_image(cmd, bytes, pri, why, aif);
+        if (t < 0) { rt.log("CreateItem(Task \"%s\") from an AIF at %08X: %s", name.c_str(), aif, why.c_str()); return t; }
+        if (HleTask* nt = task_by_item(t)) nt->exit_msg = exit_msg;
+        return t;
+    }
     if (!has_pc) {
-        rt.log("CreateItem(Task \"%s\"): no PC tag (loading separate programs is not supported)", name.c_str());
+        rt.log("CreateItem(Task \"%s\"): no PC tag and no program image", name.c_str());
         return kErrNotSupported;
     }
     if (!stack_size) stack_size = 4096;
@@ -315,6 +335,10 @@ int32_t Portfolio::create_task(const std::string& name, uint32_t tags, uint8_t p
     t.parent = cur().item;           // the creator gets SIGF_DEADTASK (or exit_msg) when this ends
     t.exit_msg = exit_msg;
     t.r[0] = argc; t.r[1] = argp;
+    if (module && !old_exec_thread()) {   // as ExecuteAsSubroutine enters a module
+        t.r[0] = pc; t.r[1] = argc; t.r[2] = argp;
+        t.r[kRegArgc] = argc; t.r[kRegArgv] = argp; t.r[kRegKernelBase] = kbase_;
+    }
     t.r[9] = base;
     t.r[10] = stack_lo + 128;          // APCS stack limit, as the kernel sets it
     t.r[13] = sp & ~3u;
@@ -337,6 +361,13 @@ int32_t Portfolio::start_program(const std::string& cmdline, const std::string& 
     std::ifstream f(host_path, std::ios::binary);
     if (!f) { why = "cannot open " + host_path; return kErrNotFound; }
     std::vector<uint8_t> file((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return start_program_image(cmdline, file, prio, why, 0);
+}
+
+// in_place: the image is already in guest memory at that address (CreateItem
+// with CREATETASK_TAG_AIF: the caller loaded it), and runs there.
+int32_t Portfolio::start_program_image(const std::string& cmdline, const std::vector<uint8_t>& file, int32_t prio,
+                                       std::string& why, uint32_t in_place) {
     AifImage img;
     if (!parse_aif(file, img, why)) return kErrNotSupported;
     if (!img.self_relocating && img.image_base == 0) { why = "not relocatable (linked at address 0)"; return kErrNotSupported; }
@@ -345,9 +376,10 @@ int32_t Portfolio::start_program(const std::string& cmdline, const std::string& 
     // follows the image), whichever is larger. Taken from the top of memory,
     // as the real loader does, to keep the game's own heap in one piece.
     uint64_t need = std::max<uint64_t>(img.load_size(), uint64_t(img.ro_size) + img.rw_size + img.zi_size) + 64;
-    uint32_t base = img.self_relocating ? alloc(uint32_t(need), kMemFromTop) : img.image_base;
+    uint32_t base = in_place ? in_place : img.self_relocating ? alloc(uint32_t(need), kMemFromTop) : img.image_base;
     if (!base) { why = "out of memory for " + std::to_string(need) + " bytes"; return kErrNoMem; }
-    rt.mem.write_block(base, img.bytes.data(), img.load_size());
+    if (in_place && !img.self_relocating && img.image_base != in_place) { why = "not relocatable"; return kErrNotSupported; }
+    if (!in_place) rt.mem.write_block(base, img.bytes.data(), img.load_size());
 
     // Arguments: argv[0] is the program path, then the rest of the command line.
     std::vector<std::string> args;
@@ -390,7 +422,8 @@ int32_t Portfolio::start_program(const std::string& cmdline, const std::string& 
     t.r[15] = base;
     t.cwd = cur().cwd;              // a new task starts in its creator's directory
     tasks_.push_back(t);
-    for (uint32_t a : {base, argv, stack}) if (allocs_.count(a)) alloc_owner_[a] = it.num;
+    for (uint32_t a : {base, argv, stack})
+        if (allocs_.count(a) && !(in_place && a == base)) alloc_owner_[a] = it.num;   // an in-place image stays its loader's
     for (size_t k = 0; k < args.size(); ++k) if (uint32_t sa = r32(argv + uint32_t(4 * k))) if (allocs_.count(sa)) alloc_owner_[sa] = it.num;
     mt = true;
     const bool translated = rt.map_module(fnv1a64_hex(file), base, img.load_size(), base + (img.entry - img.image_base), name);

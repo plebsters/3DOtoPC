@@ -282,6 +282,32 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
         if (!stem.empty()) label = stem;
     }
     eopt.game_name = (opt.game_name && *opt.game_name) ? opt.game_name : (label.empty() ? "3DO Game" : label);
+    // 5b. game.cfg: settings the runtime reads at start. A disc file tagged
+    // "(PAL)" (No-Intro style) is a PAL disc: the game runs at 50 fields a
+    // second and is told it is on a PAL console (Way of the Warrior's European
+    // disc refuses an NTSC one).
+    {
+        std::string stem = fs::u8path(opt.disc_path).filename().u8string();
+        for (char& ch : stem) ch = char(std::toupper((unsigned char)ch));
+        // ...or a program that refuses NTSC in so many words: Powers Kingdom
+        // (tagged only "(EU)") quits with "Unknown screen refresh rate 60".
+        auto says = [&](const char* text) {
+            const size_t n = std::strlen(text);
+            for (size_t i = 0; i + n <= exe_bytes.size(); ++i) {
+                size_t j = 0;
+                while (j < n && std::tolower(exe_bytes[i + j]) == text[j]) ++j;
+                if (j == n) return true;
+            }
+            return false;
+        };
+        const bool pal = stem.find("(PAL)") != std::string::npos || says("unknown screen refresh rate") ||
+                         says("european pal machine");
+        std::ofstream gc(out / "game.cfg", std::ios::trunc);
+        gc << "# 3DO to PC game settings, read when the game starts.\n";
+        gc << "# display=pal: a PAL disc (50 Hz); display=ntsc: 60 Hz.\n";
+        gc << (pal ? "display=pal\n" : "display=ntsc\n");
+        if (pal) cx.info("PAL disc: the game will run at 50 Hz");
+    }
     // 5a. Other programs on the disc(s): anything else in AIF format (movie
     // players, front ends, game parts loaded with LoadProgram / LoadCode).
     // Each is translated too and runs natively wherever the game loads it.
@@ -322,6 +348,60 @@ int convert(const tdo_convert_options& opt, const Ctx& cx) {
                 m.analysis = tdo::analyze(m.image, mo);
                 cx.info(fmt("Also translating %s (%zu blocks)", m.name.c_str(), m.analysis.blocks.size()));
                 modules.push_back(std::move(m));
+            }
+        }
+    }
+    // 5c. The Kanji font of Japanese consoles (/rom2/System/Graphics/Fonts/
+    // Kanji16.4, a ROM in the console). Some Japanese discs carry a copy in
+    // their System folder (Blue Forest Story, Sword & Sorcery); others rely on
+    // the console's (Twinkle Knights quit with "theCCB is NULL" without it).
+    // A copy found on a disc is kept in the converter's cache, and given to
+    // later games that ask for it and don't have one.
+    {
+        auto mentions = [](const std::vector<uint8_t>& b) {
+            static const char k[] = "kanji16";
+            for (size_t i = 0; i + 7 <= b.size(); ++i) {
+                size_t j = 0;
+                while (j < 7 && std::tolower(b[i + j]) == k[j]) ++j;
+                if (j == 7) return true;
+            }
+            return false;
+        };
+        bool wants = mentions(exe_bytes);
+        for (const auto& m : modules) wants = wants || mentions(m.image.bytes);
+        std::error_code ec;
+        auto find_ci = [&](fs::path dir, std::initializer_list<const char*> parts) -> fs::path {
+            for (const char* part : parts) {
+                fs::path hit;
+                for (auto& e : fs::directory_iterator(dir, ec)) if (ieq(e.path().filename().u8string(), part)) { hit = e.path(); break; }
+                if (hit.empty()) return {};
+                dir = hit;
+            }
+            return dir;
+        };
+        const fs::path on_disc = find_ci(data, {"System", "Graphics", "Fonts", "Kanji16.4"});
+        fs::path cache;
+        for (const fs::path& root : {fs::u8path(tdo::module_dir()) / "cache", fs::temp_directory_path(ec) / "3DOtoPC-cache"}) {
+            if (root.empty()) continue;
+            fs::create_directories(root / "fonts", ec);
+            if (!ec) { cache = root / "fonts" / "Kanji16.4"; break; }
+        }
+        if (!on_disc.empty()) {
+            if (!cache.empty() && !fs::exists(cache, ec)) {
+                fs::copy_file(on_disc, cache, ec);
+                if (!ec) cx.info("Kanji font found on this disc: kept for Japanese games that need it");
+            }
+        } else if (wants) {
+            if (!cache.empty() && fs::exists(cache, ec)) {
+                const fs::path dir = data / "System" / "Graphics" / "Fonts";
+                fs::create_directories(dir, ec);
+                fs::copy_file(cache, dir / "Kanji16.4", fs::copy_options::overwrite_existing, ec);
+                cx.info(ec ? "Kanji font: could not copy it into the game (" + ec.message() + ")"
+                           : "Kanji font: this game uses the Japanese console's font; copied from an earlier disc");
+            } else {
+                cx.info("Kanji font: this game uses the Japanese console's built-in font, which isn't on its disc. "
+                        "Convert a Japanese disc that has one first (Blue Forest Story or Sword & Sorcery carry "
+                        "System/Graphics/Fonts/Kanji16.4), then convert this game again, so its text can be drawn.");
             }
         }
     }

@@ -461,6 +461,11 @@ Environment variables:
 | `TDORT_LOG_AUDIO_ITEMS=1` | logs every audio item made and every item deleted (debugging) |
 | `TDORT_HI_THREADS=n` | worker threads drawing the finer picture (default: CPU threads - 1, at most 6; 0 = on the game's thread) |
 | `TDORT_HI_STATS=1` | prints how long the game waited for those workers (debugging) |
+| `TDORT_PAL=0/1` | NTSC (60 Hz) or PAL (50 Hz), overriding the game's `game.cfg` (`display=pal`, written for discs tagged "(PAL)") |
+| `TDORT_OLD_EXEC_THREAD=1` | ExecuteAsThread reads the name and priority from the stack and starts the module without KernelBase (the old way) |
+| `TDORT_OLD_TASK_AIF=1` | CreateItem of a task from a program image in memory is refused (the old way) |
+| `TDORT_OLD_NVRAM_DELETE=1` | deleting an open save file leaves it open (fails on Windows) |
+| `TDORT_OLD_PORT_SIGNALS=1` | deleted message ports keep their signal bits allocated |
 | `TDORT_GDI=1` | the window draws with GDI instead of Direct3D 11 |
 | `TDORT_HI_DUMP=file` | with `TDORT_HI_THREADS=0`, writes every batch of finer-picture rows to the file (for benchmarking the rasterizer) |
 | `TDORT_OLD_PIXC_TABLES=1` | the pixel processor computes every pixel (no lookup tables) |
@@ -678,6 +683,37 @@ Fixes found by running games (each a difference from the real OS):
   it, freed the buffers it had given away; the fight program's next big allocation landed
   on top of the screens, and drawing filled its sprite tables with pixels. A buffer given
   away now belongs to the new task (`TDORT_OLD_CONTROLMEM_SCREENS=1`: free it as before).
+* PAL discs: a disc file tagged "(PAL)", or a game whose program says it needs PAL
+  ("Unknown screen refresh rate", "European PAL machine"), gets `display=pal` in the game's
+  new `game.cfg` (settings beside the game's data folder, read at start; edit it by hand
+  for another PAL-only disc). The game then runs at 50
+  fields a second and is told it is on a PAL console (QueryGraphics field rate 50, field
+  time 20 ms, display type PAL; the vblank timer, timer delays and the audio clock follow).
+  The default picture size stays 320x240. Way of the Warrior's European disc showed
+  "this version is for a European PAL machine but your machine is U.S. NTSC" and stopped;
+  Powers Kingdom quit with "Unknown screen refresh rate 60". `TDORT_PAL=0/1` overrides
+  the file.
+* ExecuteAsThread took the thread's name and priority from the wrong places (the name is
+  the 4th argument, in a register; only the priority is on the stack) and started the
+  module without KernelBase, which a module's start-up code takes from r7 (r5/r6: argc,
+  argv). F1GP's and Royal Pro Wrestling's modules jumped to address 0 at once
+  (`TDORT_OLD_EXEC_THREAD=1`: the old way).
+* A program a game loads itself and starts with CreateItem (CREATETASK_TAG_AIF, the image
+  size and a command line) now runs where it is, as a task of its own, like LoadProgram.
+  Sangokushi IV starts "open.x" this way and quit at once (`TDORT_OLD_TASK_AIF=1`: refused).
+* Save memory: deleting a file the game still has open failed on Windows (Windows doesn't
+  delete open files); the open handles are now closed first. Psychic Detective writes a
+  test file, deletes it while open, and quit with "Error while deleting NVRAM file"
+  (`TDORT_OLD_NVRAM_DELETE=1`: the old way).
+* Message ports give back the signal they allocated for themselves when deleted, as the
+  kernel does. Penthouse Interactive makes ports for each movie; after about 23 its main
+  task had no signals left and it quit with "problem sending/receiving a signal"
+  (`TDORT_OLD_PORT_SIGNALS=1`: kept).
+* The Kanji font of Japanese consoles (/rom2/System/Graphics/Fonts/Kanji16.4) is in the
+  console, not on most discs. Some Japanese discs carry a copy (Blue Forest Story, Sword &
+  Sorcery); the converter now keeps one it finds in its cache and copies it into later
+  games whose programs ask for it. Twinkle Knights quit with "theCCB is NULL" without it:
+  convert one of those discs first, then Twinkle Knights again.
 * The window now shows the picture through Direct3D 11: the game's picture is uploaded once
   a frame and the graphics card scales it into the window with the chosen look (sharp,
   smooth, scanlines), and the message and frame-counter panels are blended on top. Before,

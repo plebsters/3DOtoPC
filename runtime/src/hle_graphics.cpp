@@ -433,15 +433,19 @@ void Portfolio::install_graphics() {
     v[gvSetReadAddress] = [this](Cpu*) { read_address_[int32_t(arg(0))] = {arg(1), arg(2)}; c.r[0] = 0; };
     v[gvResetReadAddress] = [this](Cpu*) { read_address_.erase(int32_t(arg(0))); c.r[0] = 0; };
     // QueryGraphics(tag, ret) / QueryGraphicsList(tags): facts about the display.
-    // This is an NTSC console: 60 fields a second, 320x240.
+    // An NTSC console (60 fields a second), or PAL (50) for a PAL disc
+    // (game.cfg display=pal): Way of the Warrior's European disc asks for the
+    // field rate and refuses to run at 60. The default size stays 320x240 in
+    // both: that is the picture the window shows.
     auto query = [this](uint32_t tag, uint32_t& out) -> bool {
+        const bool pal = rt.cfg.refresh_hz == 50;
         switch (tag) {
-            case 1: out = 60; return true;                 // QUERYGRAF_TAG_FIELDFREQ
-            case 2: out = 16667; return true;              // FIELDTIME (microseconds)
+            case 1: out = rt.cfg.refresh_hz; return true;  // QUERYGRAF_TAG_FIELDFREQ
+            case 2: out = field_us(); return true;         // FIELDTIME (microseconds)
             case 3: out = frame_no_; return true;          // FIELDCOUNT
             case 4: out = 320; return true;                // DEFAULTWIDTH
             case 5: out = 240; return true;                // DEFAULTHEIGHT
-            case 6: out = 1; return true;                  // DEFAULTDISPLAYTYPE: DI_TYPE_NTSC
+            case 6: out = pal ? 2 : 1; return true;        // DEFAULTDISPLAYTYPE: DI_TYPE_PAL1 or DI_TYPE_NTSC
             default: return false;
         }
     };
@@ -533,8 +537,8 @@ void Portfolio::install_graphics() {
     w32(g + graffolio::VRAMPageSize, 2048);
     w32(g + graffolio::DefaultDisplayWidth, 320);
     w32(g + graffolio::DefaultDisplayHeight, 240);
-    w32(g + graffolio::VBLTime, 16667);
-    w32(g + graffolio::VBLFreq, 60);
+    w32(g + graffolio::VBLTime, field_us());
+    w32(g + graffolio::VBLFreq, rt.cfg.refresh_hz);
     w32(g + graffolio::ZeroPage, alloc(2048, kMemVram));   // all-zero VRAM page (SPORT clears)
     w32(g + graffolio::VIRSPage, alloc(2048, kMemVram));
 
@@ -547,12 +551,12 @@ void Portfolio::install_graphics() {
 }
 
 // The audio clock: 240 Hz unless the game sets another rate (SetAudioRate,
-// SetAudioDuration), counted from the frame number at 60 frames a second.
+// SetAudioDuration), counted from the frame number (60 frames a second, 50 for PAL).
 // Crash 'n Burn runs it at 128 Hz and times its music by it; at a fixed
 // 240 Hz the music played almost twice too fast.
 uint32_t Portfolio::audio_ticks() const {
-    const uint64_t elapsed = uint64_t(frame_no_ - audio_rate_frame_) * audio_rate_;   // ticks << 16, times 60
-    return audio_rate_ticks_ + uint32_t(elapsed / (60ull << 16));
+    const uint64_t elapsed = uint64_t(frame_no_ - audio_rate_frame_) * audio_rate_;   // ticks << 16, times the frame rate
+    return audio_rate_ticks_ + uint32_t(elapsed / (uint64_t(rt.cfg.refresh_hz) << 16));
 }
 
 void Portfolio::set_audio_rate(uint32_t rate16) {

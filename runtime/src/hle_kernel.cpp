@@ -121,6 +121,7 @@ void Portfolio::stub(const std::string& name, uint32_t result) {
 }
 
 uint64_t Portfolio::usec() const { return c.cycles * 1000000ull / rt.cfg.cpu_hz; }
+uint32_t Portfolio::field_us() const { return (1000000u + rt.cfg.refresh_hz / 2) / rt.cfg.refresh_hz; }   // 16667 (NTSC) or 20000 (PAL)
 
 // ============================================================================
 // items
@@ -219,6 +220,18 @@ int32_t Portfolio::delete_item(int32_t num) {
         it->owns_buffer = false;
     }
     if (it->fp) { std::fclose(it->fp); it->fp = nullptr; }
+    // A message port gives back the signal it allocated for itself, as the
+    // kernel does. Penthouse Interactive makes ports for every movie it plays;
+    // after about 23 its main task had no signals left and it quit with
+    // "problem sending/receiving a signal". TDORT_OLD_PORT_SIGNALS=1: kept.
+    if (it->kind == ItemKind::MsgPort && it->signal_allocated && !std::getenv("TDORT_OLD_PORT_SIGNALS")) {
+        if (HleTask* t = task_by_item(it->owner_task); t && (it->signal & ~0xFFu)) {
+            t->allocated &= ~it->signal;
+            t->pending &= ~it->signal;
+            w32(t->addr + task::AllocatedSigs, t->allocated);
+        }
+        it->signal_allocated = false;
+    }
     if (it->subsys == kSubsysAudio) audio_deleted(*it);
     if (it->heap_owned) free_mem(it->addr);
     it->alive = false;
@@ -1560,7 +1573,8 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
         }
         case kNodeMsgPort: {
             uint32_t sig = 0;
-            if (!tag_value(tags, kTagPortSignal, sig)) {
+            const bool own_sig = !tag_value(tags, kTagPortSignal, sig);   // no signal given: the port allocates one
+            if (own_sig) {
                 for (uint32_t b = kSigFirstUser; b < 31; ++b)
                     if (!(cur().allocated & (1u << b))) { sig = 1u << b; break; }
                 cur().allocated |= sig;
@@ -1572,6 +1586,7 @@ int32_t Portfolio::create_item(uint32_t ctype, uint32_t tags, uint32_t size) {
             }
             HleItem& p = new_item(ItemKind::MsgPort, kSubsysKernel, kNodeMsgPort, std::max(size, msgport::Size), name);
             p.signal = sig;
+            p.signal_allocated = own_sig && sig;
             w32(p.addr + msgport::Signal, sig);
             list_init(p.addr + msgport::Msgs, 0);
             return p.num;
@@ -1859,7 +1874,7 @@ void Portfolio::timer_io(HleItem& ior, uint32_t info) {
         if (unit == kTimerUnitVblank) {
             // VBlankTimeVal: a 64-bit count, high word first. Jurassic Park's
             // terminal busy-waits on the low word (it was always 0 here).
-            const uint64_t vbl = us / 16667;
+            const uint64_t vbl = us / field_us();
             if (len >= 8) { w32(buf, uint32_t(vbl >> 32)); w32(buf + 4, uint32_t(vbl)); }
             else if (len >= 4) w32(buf, uint32_t(vbl));
         }
@@ -1879,7 +1894,7 @@ void Portfolio::timer_io(HleItem& ior, uint32_t info) {
         else if (buf && len >= 4) want = uint64_t(r32(buf)) * 1000000u;
         uint64_t us = want;
         if (cmd == kTimerCmdDelayUntil) { const uint64_t now = usec(); us = want > now ? want - now : 0; }
-        const uint32_t frames = uint32_t(std::min<uint64_t>((us + 8333) / 16667, 60u * 3600u));
+        const uint32_t frames = uint32_t(std::min<uint64_t>((us + field_us() / 2) / field_us(), uint64_t(rt.cfg.refresh_hz) * 3600u));
         if (rt.cfg.trace) rt.log("timer IO %d: %s %llu us (now %llu) -> %u frames", ior.num, cmd == kTimerCmdDelayUntil ? "until" : "delay",
                                  (unsigned long long)want, (unsigned long long)usec(), frames);
         if (!io_quick_ && multitasking() && !old_io()) { defer_io(ior, std::max<uint32_t>(frames, 1)); return; }   // SendIO: the caller carries on

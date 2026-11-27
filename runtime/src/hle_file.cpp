@@ -261,6 +261,14 @@ int32_t Portfolio::delete_nvram_file(const std::string& path) {
     std::string host;
     if (!nvram_path(path, host)) return kErrNotSupported;
     std::error_code ec;
+    // A file the game still has open: Windows refuses to delete an open file
+    // (Linux doesn't), so the open handles are closed first; the items stay,
+    // as on the console, and read as empty. Psychic Detective writes a test
+    // file to save memory, deletes it while open, and quit on the error.
+    if (!std::getenv("TDORT_OLD_NVRAM_DELETE"))
+        for (HleItem& f : items_) {
+            if (f.kind == ItemKind::File && f.fp && f.host_path == host) { std::fclose(f.fp); f.fp = nullptr; f.file_size = 0; }
+        }
     if (!fs::remove(fs::u8path(host), ec)) return kErrFsNoFile;
     rt.log("NVRAM: deleted %s", path.c_str());
     return 0;
@@ -484,12 +492,17 @@ void Portfolio::install_file() {
         c.r[15] = code;
     };
     // ExecuteAsThread(code, argc, argv, name, priority): the module as a
-    // thread of this task, with the stack size from its 3DO header.
+    // thread of this task, with the stack size from its 3DO header. The name
+    // is the fourth argument (r3) and only the priority is on the stack; the
+    // thread enters the module like ExecuteAsSubroutine (KernelBase in r7):
+    // F1GP's tsp_f1 module jumped to 0 without it. TDORT_OLD_EXEC_THREAD=1:
+    // the name and priority from the stack, and no KernelBase.
     fv[-14] = [this](Cpu*) {
         const uint32_t code = arg(0);
         if (!code) { c.r[0] = uint32_t(kErrNoMem); return; }
-        const uint32_t name_p = r32(c.r[13]);
-        const int32_t prio = int32_t(r32(c.r[13] + 4));
+        const bool old = old_exec_thread();
+        const uint32_t name_p = old ? r32(c.r[13]) : arg(3);
+        const int32_t prio = int32_t(old ? r32(c.r[13] + 4) : r32(c.r[13]));
         uint32_t stack = r32(code + 128 + 40);          // _3DOBinHeader._3DO_Stack
         if (stack < 1024 || stack > 1024 * 1024) stack = 4096;
         const uint32_t tags = alloc(5 * 8, 0);
@@ -497,7 +510,7 @@ void Portfolio::install_file() {
         const uint32_t tv[10] = {10 /*PC*/, code, 12 /*stack size*/, stack, 13 /*argc*/, arg(1), 14 /*argp*/, arg(2), 0, 0};
         for (int i = 0; i < 10; ++i) w32(tags + uint32_t(i * 4), tv[i]);
         const uint8_t pri = uint8_t(prio <= 0 ? cur().pri : std::min(prio, 254));
-        c.r[0] = uint32_t(create_task(name_p ? rstr(name_p) : "thread", tags, pri));
+        c.r[0] = uint32_t(create_task(name_p ? rstr(name_p) : "thread", tags, pri, true));
         free_mem(tags);
     };
 
@@ -668,9 +681,11 @@ void Portfolio::file_io(HleItem& ior, HleItem& f, uint32_t info) {
         const int32_t offset = int32_t(r32(info + ioinfo::Offset));
         const uint32_t sbuf = r32(info + ioinfo::SendBuf), slen = r32(info + ioinfo::SendLen);
         const uint32_t rbuf = r32(info + ioinfo::RecvBuf), rlen = r32(info + ioinfo::RecvLen);
+        // Deleted while open (see delete_nvram_file): reads and writes fail.
+        if (!f.fp && cmd != kCmdStatus) { complete_io(ior, kErrFsNoFile, 0); return; }
         auto resize = [&](uint64_t n) {
             std::error_code ec;
-            std::fflush(f.fp);
+            if (f.fp) std::fflush(f.fp);
             fs::resize_file(fs::u8path(f.host_path), n, ec);
             f.file_size = n;
         };

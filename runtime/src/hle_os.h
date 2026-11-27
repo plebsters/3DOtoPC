@@ -7,6 +7,7 @@
 #include "tdort/audio.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <memory>
@@ -41,6 +42,7 @@ struct HleItem {
     // MsgPort
     std::deque<int32_t> queue;
     uint32_t signal = 0;
+    bool     signal_allocated = false;   // a message port that allocated its own signal (freed with it)
     // Message
     int32_t  in_port = 0;
     // Screen group / screen / bitmap
@@ -190,6 +192,8 @@ public:
     void frame(uint32_t host_pad);
     std::string status_line(uint32_t frame);     // where every task is (for the log)
     uint64_t usec() const;
+    uint32_t field_us() const;             // microseconds per field
+    static bool old_exec_thread() { static const bool o = std::getenv("TDORT_OLD_EXEC_THREAD") != nullptr; return o; }
 
 private:
     void install_kernel_swis();
@@ -280,7 +284,9 @@ private:
     void    sleep_until(uint32_t frame);              // resume after this SWI, at that frame
     void    task_exit(HleTask& t, const char* why);
     void    raise_signal(int32_t task_item, uint32_t mask);
-    int32_t create_task(const std::string& name, uint32_t tags, uint8_t pri);
+    // module: the thread runs a code module from its AIF header (ExecuteAsThread),
+    // which takes argc, argv and KernelBase from r5-r7 like a program.
+    int32_t create_task(const std::string& name, uint32_t tags, uint8_t pri, bool module = false);
     void    install_tasks();
     // deques, not vectors: references to items and tasks stay valid while new
     // ones are added. With a vector, code holding one item while creating
@@ -304,6 +310,7 @@ public:
     // Load another executable from the disc (LoadProgram) and run it as a
     // task of its own. Returns the task item, or a negative error with `why`.
     int32_t start_program(const std::string& cmdline, const std::string& host_path, int32_t prio, std::string& why);
+    int32_t start_program_image(const std::string& cmdline, const std::vector<uint8_t>& file, int32_t prio, std::string& why, uint32_t in_place);
     // exit()/AIF exit from the current task: ends the whole game for the
     // first program, only that task for any other.
     void    exit_current(const char* why);

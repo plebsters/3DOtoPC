@@ -34,6 +34,20 @@ void Memory::watch_store(uint32_t addr, uint32_t v, int size, uint32_t pc) {
 Runtime::Runtime(RuntimeConfig config) : cfg(std::move(config)) {
     g_rt = this;
     cpu.mem = &mem;
+    // game.cfg beside the game's data folder: settings the converter wrote for
+    // this disc, one "key=value" a line. display=pal: a PAL disc, so the game
+    // runs at 50 fields a second and is told it is on a PAL console.
+    // TDORT_PAL=0/1 overrides it.
+    {
+        const std::filesystem::path p = std::filesystem::u8path(cfg.data_dir).parent_path() / "game.cfg";
+        std::ifstream gc(p);
+        std::string line;
+        while (gc && std::getline(gc, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            if (line == "display=pal") cfg.refresh_hz = 50;
+        }
+        if (const char* e = std::getenv("TDORT_PAL")) cfg.refresh_hz = std::atoi(e) ? 50 : 60;
+    }
     if (const char* w = std::getenv("TDORT_WRITE_WATCH")) {
         char* end = nullptr;
         const uint32_t a = uint32_t(std::strtoul(w, &end, 16));
