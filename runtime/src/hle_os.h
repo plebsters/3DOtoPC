@@ -84,6 +84,7 @@ struct HleTask {
     bool     program = false;       // a separately loaded executable, not a thread
     uint32_t image_lo = 0, image_hi = 0;
     uint64_t past_sleep_frame = ~0ull; uint32_t past_sleeps = 0;   // SleepUntilTime with a time gone, this frame   // a loaded program's image (translated blocks mapped there)
+    uint64_t short_delay_us = 0;    // timer delays under half a frame not yet slept off
     int32_t  exit_msg = 0;          // CREATETASK_TAG_MSGFROMCHILD: replied to the creator on exit
     int32_t  exit_status = 0;       // SetExitStatus / exit() code
     std::string cwd;                // current directory, guest-normalized ("/Data"); each task has its own

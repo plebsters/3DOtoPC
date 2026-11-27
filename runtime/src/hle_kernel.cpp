@@ -838,7 +838,20 @@ void Portfolio::install_kernel_vectors() {
     };
     // In the 1.x SDKs WaitPort is kernel vector -24 (a SWI in later ones).
     v[-24] = [this](Cpu*) { wait_port(int32_t(arg(0)), int32_t(arg(1))); };
-    v[kvStartupInit] = [](Cpu*) { /* must preserve r0/r1 (argc/argv): cstartup calls main next */ };
+    // cstartup: the argument count and vector were set up here when the task
+    // started (r0/r1 already hold them, and must be kept: main is called
+    // next). The OS routine also leaves argc in r4, argv in r5 and 0 in r6 (it
+    // stores the command line's NULs from r6). Winning Post's wp_open.task
+    // sends LaunchMe a message whose size is the never-set r6 its main kept;
+    // with argv left there LaunchMe copied 1.8 MB over its own stack and
+    // crashed after the opening. TDORT_OLD_CSTARTUP=1: registers untouched.
+    v[kvStartupInit] = [this](Cpu*) {
+        static const bool old = std::getenv("TDORT_OLD_CSTARTUP") != nullptr;
+        if (old || c.r[0] == 0) return;   // no command line: the OS routine returns at once
+        c.r[4] = c.r[0];
+        c.r[5] = c.r[1];
+        c.r[6] = 0;
+    };
     v[kvExit] = [this](Cpu*) { rt.log("guest exit(%d) from \"%s\"", int32_t(c.r[0]), cur().name.c_str()); cur().exit_status = int32_t(c.r[0]); exit_current("exit()"); };
 
     int32_t kitem = 0;
@@ -1018,7 +1031,18 @@ void Portfolio::install_kernel_swis() {
     });
     K(29, "callbacksuper", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });   // supervisor code: not available
     K(34, "CompleteIO", [this](Cpu*) { c.r[0] = uint32_t(kErrNotSupported); });       // for device drivers
-    K(kDeleteItem, "DeleteItem", [this](Cpu*) { c.r[0] = uint32_t(game_delete_item(int32_t(arg(0)))); });
+    // A task that deletes itself never returns, and the switch to the next
+    // task happens inside the delete: the result must not land in that task's
+    // r0. Ide Yousuke's main task was waiting on its scheduler signal when a
+    // worker deleted itself; the 0 turned its retried WaitSignal(0x100) into
+    // WaitSignal(0), which returned at once, two workers then ran together
+    // and the game stayed on "Now Loading". TDORT_OLD_DELETE_R0=1: as before.
+    K(kDeleteItem, "DeleteItem", [this](Cpu*) {
+        static const bool old = std::getenv("TDORT_OLD_DELETE_R0") != nullptr;
+        const int32_t me = cur().item;
+        const int32_t r = game_delete_item(int32_t(arg(0)));
+        if (old || cur().item == me) c.r[0] = uint32_t(r);
+    });
     auto find = [this](bool open) {
         return [this, open](Cpu*) {
             const uint32_t ctype = arg(0);
@@ -1894,7 +1918,18 @@ void Portfolio::timer_io(HleItem& ior, uint32_t info) {
         else if (buf && len >= 4) want = uint64_t(r32(buf)) * 1000000u;
         uint64_t us = want;
         if (cmd == kTimerCmdDelayUntil) { const uint64_t now = usec(); us = want > now ? want - now : 0; }
-        const uint32_t frames = uint32_t(std::min<uint64_t>((us + field_us() / 2) / field_us(), uint64_t(rt.cfg.refresh_hz) * 3600u));
+        uint32_t frames = uint32_t(std::min<uint64_t>((us + field_us() / 2) / field_us(), uint64_t(rt.cfg.refresh_hz) * 3600u));
+        // Delays under half a frame add up, and the task sleeps a frame each
+        // time they make one: on the console the task is off the CPU for that
+        // time and lower-priority tasks run. Mahjong Gokuu Tenjiku's timer
+        // thread (priority 150) ticks every 3 ms; finishing each delay at once
+        // kept it running forever and the main program never started (black
+        // screen). TDORT_OLD_SHORT_DELAY=1: those delays only yield.
+        static const bool old_short = std::getenv("TDORT_OLD_SHORT_DELAY") != nullptr;
+        if (frames == 0 && us > 0 && !old_short && multitasking()) {
+            cur().short_delay_us += us;
+            if (cur().short_delay_us >= field_us()) { cur().short_delay_us -= field_us(); frames = 1; }
+        }
         if (rt.cfg.trace) rt.log("timer IO %d: %s %llu us (now %llu) -> %u frames", ior.num, cmd == kTimerCmdDelayUntil ? "until" : "delay",
                                  (unsigned long long)want, (unsigned long long)usec(), frames);
         if (!io_quick_ && multitasking() && !old_io()) { defer_io(ior, std::max<uint32_t>(frames, 1)); return; }   // SendIO: the caller carries on

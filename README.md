@@ -466,6 +466,10 @@ Environment variables:
 | `TDORT_OLD_TASK_AIF=1` | CreateItem of a task from a program image in memory is refused (the old way) |
 | `TDORT_OLD_NVRAM_DELETE=1` | deleting an open save file leaves it open (fails on Windows) |
 | `TDORT_OLD_PORT_SIGNALS=1` | deleted message ports keep their signal bits allocated |
+| `TDORT_OLD_CSTARTUP=1` | the kernel's cstartup leaves r4-r6 as they were (the old way) |
+| `TDORT_OLD_CHILD_PROGRAMS=1` | programs keep running after the program that started them ends |
+| `TDORT_OLD_DELETE_R0=1` | a task deleting itself leaves DeleteItem's result in the next task's r0 |
+| `TDORT_OLD_SHORT_DELAY=1` | timer delays under half a frame only yield (the task doesn't sleep) |
 | `TDORT_GDI=1` | the window draws with GDI instead of Direct3D 11 |
 | `TDORT_HI_DUMP=file` | with `TDORT_HI_THREADS=0`, writes every batch of finer-picture rows to the file (for benchmarking the rasterizer) |
 | `TDORT_OLD_PIXC_TABLES=1` | the pixel processor computes every pixel (no lookup tables) |
@@ -714,6 +718,27 @@ Fixes found by running games (each a difference from the real OS):
   Sorcery); the converter now keeps one it finds in its cache and copies it into later
   games whose programs ask for it. Twinkle Knights quit with "theCCB is NULL" without it:
   convert one of those discs first, then Twinkle Knights again.
+* A program's start-up code calls the kernel's cstartup, which hands back the argument count
+  and list and leaves argc in r4, argv in r5 and 0 in r6; r6 was left holding argv. Winning
+  Post's opening program sends LaunchMe a message whose size is that untouched r6, and
+  LaunchMe copied 1.8 MB over its own stack and crashed after the opening
+  (`TDORT_OLD_CSTARTUP=1`: registers untouched).
+* When a program ends, the programs it started end too, unless it gave them to another task
+  with SetItemOwner (a child task is one of its items, and its items are deleted with it).
+  Furopon World's logo program left its music program running; the title's own music program
+  then made a second port with the same name, the title found the old one and waited forever
+  on a black screen. Samurai Shodown hands its fight program to LaunchMe first, so it keeps
+  running (`TDORT_OLD_CHILD_PROGRAMS=1`: programs always outlive the one that started them).
+* A task that deletes itself no longer leaves DeleteItem's result in the next task's r0 (the
+  switch happens inside the delete). Ide Yousuke Meijin no Shin Jissen Mahjong's main task
+  was waiting on its scheduler signal when a worker deleted itself; the wait became a wait on
+  no signals, returned at once, two workers ran together and the game stayed on "Now Loading"
+  (`TDORT_OLD_DELETE_R0=1`: as before).
+* Timer delays shorter than half a frame add up, and the task sleeps a frame each time they
+  make a whole one, so lower-priority tasks get to run as on the console. Mahjong Gokuu
+  Tenjiku's timer thread (priority 150) ticks every 3 ms; each delay finished at once, it
+  never stopped running and the main program never started (black screen)
+  (`TDORT_OLD_SHORT_DELAY=1`: those delays only yield).
 * The window now shows the picture through Direct3D 11: the game's picture is uploaded once
   a frame and the graphics card scales it into the window with the chosen look (sharp,
   smooth, scanlines), and the message and frame-counter panels are blended on top. Before,

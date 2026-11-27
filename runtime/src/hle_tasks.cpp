@@ -134,6 +134,28 @@ void Portfolio::task_exit(HleTask& t, const char* why) {
         for (int32_t th : threads)
             if (HleTask* o = task_by_item(th); o && o->st != HleTask::St::Dead) task_exit(*o, "its task ended");
     }
+    // Programs it started go too, unless they were given to another task: a
+    // task's items (a child task is one) are deleted when it ends, and
+    // SetItemOwner moves one out of that list. Furopon World's logo program
+    // leaves its BGMchild behind; the title program's BGMchild then made a
+    // second port of the same name and the title, finding the old one, waited
+    // forever. Samurai Shodown's pselect hands its fight program to LaunchMe
+    // with SetItemOwner first, so that one keeps running.
+    // TDORT_OLD_CHILD_PROGRAMS=1: programs always outlive their parent.
+    static const bool keep_children = std::getenv("TDORT_OLD_CHILD_PROGRAMS") != nullptr;
+    if (t.program && !keep_children) {
+        std::vector<int32_t> kids;
+        for (const HleTask& o : tasks_) {
+            if (o.item == t.item || !o.program || o.st == HleTask::St::Dead) continue;
+            const HleItem* oi = item(o.item);
+            if (!oi || !oi->owner_task) continue;
+            const HleTask* own = task_by_item(oi->owner_task);
+            if (oi->owner_task == t.item || (own && own->item != t.item && owning_task(*own) == t.item))
+                kids.push_back(o.item);
+        }
+        for (int32_t k : kids)
+            if (HleTask* o = task_by_item(k); o && o->st != HleTask::St::Dead) task_exit(*o, "the program that owned it ended");
+    }
     // Free the stack the kernel owns (allocated here, or handed over with
     // CREATETASK_TAG_ALLOCDTHREADSP by the C library's CreateThread). Left
     // behind, each thread's stack fragments the heap: Slam 'n Jam restarts its
